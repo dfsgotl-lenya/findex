@@ -1,3 +1,4 @@
+[![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=dfsgotl-lenya_findex&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=dfsgotl-lenya_findex)
 # findex — Lab 01: Iterators, Generators, and the Corpus
 
 A small text-search engine project started from the corpus-intake stage. This lab focuses on Python's iteration protocol, generators, lazy pipelines, `pathlib`, `re`, Unicode normalization, and memory measurement with `tracemalloc`.

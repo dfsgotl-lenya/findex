@@ -1,18 +1,46 @@
 [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=dfsgotl-lenya_findex&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=dfsgotl-lenya_findex)
-# findex — Lab 01: Iterators, Generators, and the Corpus
+findex — Лабораторна робота №1
 
-A small text-search engine project started from the corpus-intake stage. This lab focuses on Python's iteration protocol, generators, lazy pipelines, `pathlib`, `re`, Unicode normalization, and memory measurement with `tracemalloc`.
+Тема: ітератори, генератори та корпус текстів.
 
-The implementation follows the Lab 01 requirements: a lazy `iter_documents()` generator, a streaming `tokenize()` generator using NFC + `casefold()` + `re.finditer`, a one-pass statistics pipeline, an eager comparison, and tests.
+Мета: реалізувати перший етап пошукової системи findex — потокову обробку текстових документів без завантаження всього корпусу в пам'ять.
 
-## Project structure
 
-```text
+
+Використані технології
+
+Python 3.13
+
+uv
+
+pathlib
+
+re
+
+Unicode-нормалізація NFC
+
+casefold()
+
+генератори та ітератори
+
+collections.Counter
+
+itertools.islice
+
+tracemalloc
+
+pytest
+
+ruff
+
+SonarQube Cloud + GitHub Actions
+
+Структура проєкту
+
 findex/
-├── pyproject.toml
-├── README.md
-├── .gitignore
-├── data/                  # local corpus; ignored by Git
+├── .github/
+│   └── workflows/
+│       └── sonar.yml
 ├── src/
 │   └── findex/
 │       ├── __init__.py
@@ -21,212 +49,194 @@ findex/
 │       ├── stats.py
 │       └── benchmark.py
 ├── tests/
-│   └── test_tokenize.py
-└── benchmarks/
-    └── make_demo_corpus.py
-```
+├── benchmarks/
+├── data/              # локальний корпус, не потрапляє до Git
+├── sonar-project.properties
+├── pyproject.toml
+├── uv.lock
+├── .gitignore
+└── README.md
 
-## Corpus
+Встановлення
 
-Recommended course corpus: **Project Gutenberg plain-text books**. The course explicitly lists Gutenberg as one valid source and requires the local corpus to live under `data/`, with `data/` excluded from Git.
+У корені проєкту:
 
-For the first lab, a small subset is enough while developing. Later labs can scale toward about 1,000 documents or about 50 MB of text.
-
-Put `.txt` files in `data/`, for example:
-
-```text
-data/
-├── book-001.txt
-├── book-002.txt
-└── ...
-```
-
-Do **not** commit the corpus itself.
-
-## Setup with uv
-
-The course standard is Python 3.12+ and `uv`, with an `src/` layout and `ruff`/`pytest` development tooling.
-
-```powershell
 uv sync
+
+Перевірка коду та тестів:
+
 uv run pytest
 uv run ruff check .
-```
 
-## M1 — Lazy document stream
+1. Потокове читання документів
 
-`src/findex/corpus.py` exposes:
+Функція iter_documents() знаходиться у src/findex/corpus.py.
 
-```python
-iter_documents(root: Path) -> Iterator[Document]
-```
+Вона:
 
-`Document` contains `doc_id`, `path`, and `text`. The function is a generator, discovers `.txt` files lazily with `Path.rglob()`, opens one file at a time, and logs/skips files that cannot be read as UTF-8. This avoids materializing the whole corpus in memory. The lab specifically asks for a one-document-at-a-time generator.
+знаходить текстові файли через Path.rglob();
 
-## M2 — Streaming tokenizer
+читає документи по одному;
 
-`tokenize(text)` first applies:
+повертає документи через генератор;
 
-1. Unicode NFC normalization;
-2. `casefold()` for case-insensitive matching;
-3. `re.finditer()` to yield matches lazily.
+не завантажує весь корпус у пам'ять одночасно.
 
-Token policy:
+2. Потоковий токенізатор
 
-- letters and digits are retained;
-- mixed alphanumeric forms such as `Python3` stay one token;
-- internal ASCII `'` and typographic `’` are retained (`don't`, `п'ять`);
-- hyphens separate words (`state-of-the-art` → `state`, `of`, `the`, `art`);
-- punctuation and symbols are separators;
-- underscores are not treated as word characters.
+Функція tokenize() знаходиться у src/findex/tokenize.py.
 
-These choices are explicit because the lab requires documented policies for apostrophes, hyphens, and digits.
+Послідовність обробки:
 
-## M3 — Statistics pipeline
+Unicode NFC-нормалізація;
 
-Run:
+casefold() для нечутливості до регістру;
 
-```powershell
+re.finditer() для лінивого отримання токенів.
+
+Правила токенізації
+
+літери та цифри зберігаються;
+
+Python3 залишається одним токеном;
+
+внутрішні апострофи ' та ’ зберігаються: don't, п'ять;
+
+дефіс розділяє слова: state-of-the-art → state, of, the, art;
+
+розділові знаки та символи є роздільниками;
+
+_ не вважається частиною слова.
+
+3. Статистика корпусу
+
+Запуск:
+
 uv run python -m findex.stats data/
-```
 
-Limit processing during development:
+Обчислюються за один прохід:
 
-```powershell
+кількість документів;
+
+загальна кількість токенів;
+
+розмір словника;
+
+топ-50 термів;
+
+час виконання;
+
+пікова пам'ять через tracemalloc.
+
+Для обмеження кількості документів:
+
 uv run python -m findex.stats data/ --limit 100
-```
 
-The pipeline computes in one pass:
+Параметр --limit реалізовано через itertools.islice.
 
-- document count;
-- total token count;
-- vocabulary size;
-- top-50 terms;
-- elapsed wall-clock time;
-- peak traced memory.
+4. Порівняння eager та lazy
 
-The `--limit` option uses `itertools.islice`, as required by the lab.
+Для порівняння двох підходів:
 
-## M4 — Eager vs lazy measurement
+uv run python -m findex.benchmark data/ --limit 300
 
-The intentionally eager implementation reads documents into a list and then creates a list of token lists. The lazy implementation keeps documents and tokens flowing through generators and lets only the `Counter` grow.
+Eager зберігає документи та списки токенів у пам'яті.
 
-Run the comparison on the same corpus slice:
+Lazy обробляє документи й токени через генератори та не створює великих проміжних списків.
 
-```powershell
-uv run python -m findex.benchmark data/ --limit 100
-```
+Результати вимірювань
 
-### Measurement table
+Значення нижче потрібно заповнити результатами запуску на власному комп'ютері. Обидва варіанти мають обробляти однакову кількість документів.
 
-The following values are a real reference run for this implementation in the current Python 3.13.5 Linux environment. Before submission, rerun the same benchmark on your Windows machine and replace the table values, because the lab requires measurements from your machine.
+Варіант
 
-| Version | Documents | Tokens | Vocabulary | Peak memory | Elapsed |
-|---|---:|---:|---:|---:|---:|
-| eager (lists) | 300 | 1,656,000 | 57 | 107.25 MiB | 3.1548 s |
-| lazy (generators) | 300 | 1,656,000 | 57 | 0.65 MiB | 3.6225 s |
+Документи
 
-The eager version keeps every `Document`, every token list, and all token strings alive at the same time, so memory grows with the corpus slice. In the lazy version, upstream stages keep only the current document/token work plus the `Counter`; old documents and tokens can be released after they are consumed. Lazy processing therefore avoids the large intermediate lists, although its peak is not zero because one document's text, generator state, regular-expression objects, and the growing `Counter` still require memory. This is the central memory claim the lab asks you to measure rather than guess.
+Токени
 
-## Local benchmark corpus
+Словник
 
-For a reproducible test without committing data, create a deterministic local corpus outside `data/` or directly inside ignored `data/`:
+Пікова пам'ять
 
-```powershell
-uv run python benchmarks/make_demo_corpus.py data/benchmark --documents 300 --copies-per-document 80
-uv run python -m findex.benchmark data/benchmark --limit 300
-```
+Час
 
-The generated benchmark corpus is only a measurement fixture. For the semester project, replace it with your chosen real corpus (for example, Project Gutenberg books).
+Eager
 
-## Generator checks
+—
 
-You can demonstrate that both main stages are generators:
+—
 
-```python
-import inspect
-from pathlib import Path
+—
 
-from findex.corpus import iter_documents
-from findex.tokenize import tokenize
+—
 
-print(inspect.isgeneratorfunction(iter_documents))
-print(inspect.isgeneratorfunction(tokenize))
+—
 
-print(next(iter_documents(Path("data"))))
-print(next(tokenize("Hello, world!")))
-```
+Lazy
 
-The lab uses generator identity and the ability to obtain a next value before reading the whole corpus as evidence of laziness.
+—
 
-## Tests
+—
 
-```powershell
+—
+
+—
+
+—
+
+Очікуваний висновок: lazy-обробка використовує значно менше пам'яті, тому що не зберігає весь корпус і всі проміжні списки токенів одночасно.
+
+5. Тести
+
+Запуск:
+
 uv run pytest
-```
 
-The tokenizer tests cover mixed case, Cyrillic, a combining-mark accent, apostrophes, hyphens, digits, punctuation, and empty input, matching the requested categories.
+Тести перевіряють, зокрема:
 
-## Reflection — defense notes
+регістр;
 
-### 1. What does `for x in xs` really do?
+кирилицю;
 
-Conceptually:
+Unicode та combining marks;
 
-```python
-it = iter(xs)
-while True:
-    try:
-        x = next(it)
-    except StopIteration:
-        break
-```
+апострофи;
 
-An **iterable** can produce an iterator with `__iter__()`. An **iterator** also implements `__next__()` and remembers its current position. A generator object is an iterator created by a generator function.
+дефіси;
 
-### 2. Why can a list be reused but a generator cannot?
+цифри;
 
-A list is reusable because `iter(list)` creates a fresh iterator starting at the beginning. A generator is its own progressing iterator; once exhausted, subsequent `next()` calls continue to raise `StopIteration`. To make processing restartable, call the generator function again or materialize the data into a list.
+розділові знаки;
 
-### 3. What is in memory around the 10,000th token?
+порожній рядок.
 
-The lazy pipeline holds the current document text, the current generator/regex state, the `Counter`, and small supporting objects. Previously consumed documents and tokens are not retained by the pipeline. The `Counter` grows because it is the actual result being produced.
+6. SonarQube Cloud
 
-### 4. Where does a tokenizer exception appear?
+Проєкт підключено до SonarQube Cloud через GitHub Actions.
 
-A generator function does not execute its body when the generator object is created. Execution begins when the generator is consumed, so an exception inside the body surfaces at the consuming operation (`next()`, `for`, `Counter`, etc.), not at the original call that created the generator.
+SonarQube використовується для автоматичного аналізу якості Python-коду та перевірки Quality Gate.
 
-### 5. Why `casefold()` and NFC?
+Проєкт SonarQube:
+https://sonarcloud.io/project/overview?id=dfsgotl-lenya_findex
 
-`casefold()` is designed for caseless matching and can make forms such as `Straße` and `STRASSE` compare consistently. NFC normalization makes canonically equivalent Unicode representations share the same composed form; for example, `café` and `cafe\u0301` should tokenize to the same normalized token.
+7. Відповіді для захисту
 
-### 6. `findall` vs `finditer`
+Що відбувається у for x in xs?
 
-Both use the same pattern, but `findall` materializes the matches in a list, while `finditer` yields match objects lazily. On a very large document, the list of all matches adds a potentially large memory cost.
+Python отримує ітератор через iter(xs), після чого послідовно викликає next() до отримання StopIteration.
 
-### 7. Why isn't lazy memory zero?
+Чому генератор не можна повторно пройти після завершення?
 
-Laziness removes the large intermediate corpus/token lists; it does not remove the memory needed for the current document, current generator state, the regex machinery, Python object overhead, and the growing `Counter`.
+Генератор є ітератором зі збереженим станом. Після завершення він більше не повертає елементи.
 
-## Deliverable checklist
+Чому finditer() кращий для великого тексту?
 
-- [x] `src/` project layout
-- [x] `uv` project configuration
-- [x] `data/` ignored by Git
-- [x] `iter_documents()` generator
-- [x] `tokenize()` generator
-- [x] NFC + `casefold()` + `re.finditer()`
-- [x] documented apostrophe/hyphen/digit policy
-- [x] tokenizer tests
-- [x] one-pass statistics with `--limit` / `islice`
-- [x] eager-vs-lazy benchmark implementation
-- [ ] replace benchmark table placeholders with your own machine's measurements
-- [ ] add your real corpus to local `data/`
-- [ ] make repository public and push to GitHub
-- [ ] create Git tag `lab-01`
+Він повертає збіги поступово, а не створює список усіх результатів одразу.
 
-The official lab's definition of done requires the eager-vs-lazy table to contain real numbers from the student's machine and the repository to be tagged `lab-01`.
+Чому lazy-версія споживає менше пам'яті?
 
-### Updating the table
+Документи та токени обробляються по одному, тому великі проміжні списки не зберігаються в пам'яті.
 
-After running `uv run python -m findex.benchmark data/benchmark --limit 300`, copy the two output rows into the table above. Keep the same document count for both versions so the comparison is fair.
+Використана версія
+
+Тег лабораторної: lab-01

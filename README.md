@@ -156,16 +156,9 @@ uv run pytest
 - розділові знаки;
 - порожній рядок.
 
-## 6. SonarQube Cloud
 
-Проєкт підключено до SonarQube Cloud через GitHub Actions.
 
-SonarQube використовується для автоматичного аналізу якості Python-коду та перевірки Quality Gate.
-
-**Проєкт SonarQube:**
-https://sonarcloud.io/project/overview?id=dfsgotl-lenya_findex
-
-## 7. Відповіді для захисту
+## 6. Відповіді для захисту
 
 ### Що відбувається у `for x in xs`?
 

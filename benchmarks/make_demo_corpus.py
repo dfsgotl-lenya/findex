@@ -27,8 +27,11 @@ def main() -> None:
         parser.error("documents and copies-per-document must be positive")
 
     args.root.mkdir(parents=True, exist_ok=True)
-    body = TEMPLATE * args.copies_per_document
     for index in range(1, args.documents + 1):
+        # Each document gets a unique term so the search benchmark has
+        # genuinely rare terms to compare with the common vocabulary.
+        rare_term = f"raretoken{index:04d}"
+        body = (TEMPLATE * args.copies_per_document) + f" {rare_term}\n"
         path = args.root / f"doc-{index:04d}.txt"
         path.write_text(body, encoding="utf-8")
 

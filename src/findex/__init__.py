@@ -1,4 +1,4 @@
-"""findex: streaming corpus intake for a small full-text search engine."""
+"""findex: a small educational full-text search engine."""
 
 from .corpus import Document, iter_documents
 from .tokenize import tokenize

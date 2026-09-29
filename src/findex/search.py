@@ -1,16 +1,22 @@
-"""Boolean search over sorted inverted-index postings."""
+"""Boolean compatibility search and ranked Lab 3 search."""
 
 from __future__ import annotations
 
 import argparse
+import logging
 import tracemalloc
 from collections.abc import Sequence
 from pathlib import Path
 from time import perf_counter
 
-from .index import DocMeta, InvertedIndex, Posting
-from .store import load
-from .tokenize import tokenize
+from .index import DocMeta, Index, Posting
+from .query import And, Not, Or, Phrase, QueryNode, Term, parse
+from .ranking import BM25, Scorer, SearchResult, TfIdf, score_terms, top_k
+from .snippets import make_snippet
+from .store import open_index
+from .timing import timed
+
+logger = logging.getLogger(__name__)
 
 
 def _posting_ids(postings: Sequence[Posting]) -> list[int]:
@@ -46,23 +52,18 @@ def _or_ids(left: Sequence[int], right: Sequence[int]) -> list[int]:
         else:
             result.append(right[j])
             j += 1
-    result.extend(left[i:])
-    result.extend(right[j:])
-    return result
+    return result + list(left[i:]) + list(right[j:])
 
 
 def merge_and(left: Sequence[Posting], right: Sequence[Posting]) -> list[int]:
-    """Intersect two postings lists with a two-pointer merge."""
     return _and_ids(_posting_ids(left), _posting_ids(right))
 
 
 def merge_or(left: Sequence[Posting], right: Sequence[Posting]) -> list[int]:
-    """Union two postings lists with a two-pointer merge."""
     return _or_ids(_posting_ids(left), _posting_ids(right))
 
 
 def merge_not(all_doc_ids: Sequence[int], excluded: Sequence[Posting]) -> list[int]:
-    """Return all document IDs except those in *excluded*, both sorted."""
     excluded_ids = _posting_ids(excluded)
     result: list[int] = []
     j = 0
@@ -74,64 +75,104 @@ def merge_not(all_doc_ids: Sequence[int], excluded: Sequence[Posting]) -> list[i
     return result
 
 
-def search(index: InvertedIndex, query: str, *, engine: str = "merge") -> list[int]:
-    """Evaluate a simple left-to-right Boolean query.
+def _evaluate_merge(node: QueryNode, index: Index) -> list[int]:
+    if isinstance(node, Term):
+        return _posting_ids(index.postings.get(node.value, ()))
+    if isinstance(node, Phrase):
+        return sorted(node.evaluate(index))
+    if isinstance(node, And):
+        return _and_ids(
+            _evaluate_merge(node.left, index),
+            _evaluate_merge(node.right, index),
+        )
+    if isinstance(node, Or):
+        return _or_ids(
+            _evaluate_merge(node.left, index),
+            _evaluate_merge(node.right, index),
+        )
+    if isinstance(node, Not):
+        child_ids = _evaluate_merge(node.child, index)
+        return _subtract_sorted(index.doc_ids, child_ids)
+    raise TypeError(f"Unsupported query node: {type(node)!r}")
 
-    Adjacent terms imply AND. ``OR`` performs union and ``NOT`` subtracts the
-    right-hand term. Query words use the same normalization rules as indexing.
-    """
+
+def _subtract_sorted(
+    all_doc_ids: Sequence[int],
+    excluded_ids: Sequence[int],
+) -> list[int]:
+    result: list[int] = []
+    j = 0
+    for doc_id in all_doc_ids:
+        while j < len(excluded_ids) and excluded_ids[j] < doc_id:
+            j += 1
+        if j >= len(excluded_ids) or excluded_ids[j] != doc_id:
+            result.append(doc_id)
+    return result
+
+
+def boolean_search(
+    index: Index,
+    query: str,
+    *,
+    engine: str = "merge",
+) -> list[int]:
+    """Evaluate a Boolean query with the Lab 2 merge or set engine."""
     if engine not in {"merge", "set"}:
         raise ValueError("engine must be 'merge' or 'set'")
-
-    terms = list(tokenize(query))
-    if not terms:
-        return []
-
-    current: list[int] = []
-    operator = "AND"
-    initialized = False
-
-    for term in terms:
-        if term.upper() in {"OR", "NOT"} and initialized:
-            operator = term.upper()
-            continue
-
-        posting_list = index.postings.get(term, ())
-        right_ids = _posting_ids(posting_list)
-
-        if not initialized:
-            current = right_ids
-            initialized = True
-            operator = "AND"
-            continue
-
-        if engine == "merge":
-            if operator == "AND":
-                current = _and_ids(current, right_ids)
-            elif operator == "OR":
-                current = _or_ids(current, right_ids)
-            else:
-                current = _and_ids(
-                    current,
-                    merge_not(index.doc_ids, posting_list),
-                )
-        elif operator == "AND":
-            current = sorted(set(current) & set(right_ids))
-        elif operator == "OR":
-            current = sorted(set(current) | set(right_ids))
-        else:
-            current = sorted(set(current) - set(right_ids))
-        operator = "AND"
-
-    return current
+    tree = parse(query)
+    if engine == "merge":
+        return _evaluate_merge(tree, index)
+    return sorted(tree.evaluate(index))
 
 
 def search_with_meta(
-    index: InvertedIndex, query: str, *, engine: str = "merge"
+    index: Index,
+    query: str,
+    *,
+    engine: str = "merge",
 ) -> list[tuple[int, DocMeta]]:
-    """Return matching IDs together with display metadata."""
-    result = search(index, query, engine=engine)
-    return [(doc_id, index.doc_meta[doc_id]) for doc_id in result]
+    ids = boolean_search(index, query, engine=engine)
+    return [(doc_id, index.doc_meta[doc_id]) for doc_id in ids]
+
+
+@timed
+def search(
+    index: Index,
+    query: str,
+    *,
+    scorer: Scorer | None = None,
+    k: int = 10,
+    engine: str | None = None,
+) -> list[SearchResult] | list[int]:
+    """Run Boolean compatibility search or ranked search."""
+    if scorer is None:
+        return boolean_search(index, query, engine=engine or "merge")
+    if k < 1:
+        raise ValueError("k must be >= 1")
+
+    tree = parse(query)
+    matched = index.evaluate_query(query)
+    terms = tree.positive_terms()
+    scores = score_terms(index, terms, matched, scorer)
+    results = top_k(scores, index, k)
+
+    enriched: list[SearchResult] = []
+    for result in results:
+        meta = index.doc_meta[result.doc_id]
+        enriched.append(
+            SearchResult(
+                score=result.score,
+                doc_id=result.doc_id,
+                title=result.title,
+                snippet=make_snippet(meta.path, terms, width=80),
+            )
+        )
+    logger.info("query cache: %s", index.cache_info())
+    return enriched
+
+
+def _scorer_from_name(name: str) -> Scorer:
+    return BM25() if name == "bm25" else TfIdf()
 
 
 def _format_mib(value: int) -> str:
@@ -139,33 +180,61 @@ def _format_mib(value: int) -> str:
 
 
 def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     parser = argparse.ArgumentParser(description="Search a saved findex index.")
-    parser.add_argument("index", type=Path, help="Path to saved index")
-    parser.add_argument("query", help="Boolean query")
+    parser.add_argument("index", type=Path)
+    parser.add_argument("query")
+    parser.add_argument(
+        "--scorer",
+        choices=("bm25", "tfidf"),
+        default="bm25",
+    )
     parser.add_argument("--engine", choices=("merge", "set"), default="merge")
+    parser.add_argument("-k", type=int, default=10)
     parser.add_argument("--format", choices=("pickle", "json"), default=None)
     args = parser.parse_args()
 
+    if args.k < 1:
+        parser.error("-k must be >= 1")
+
     tracemalloc.start()
     started = perf_counter()
-    load_started = perf_counter()
-    index = load(args.index, format=args.format)
-    loaded = perf_counter()
-    results = search(index, args.query, engine=args.engine)
-    finished = perf_counter()
-    _current, peak = tracemalloc.get_traced_memory()
-    tracemalloc.stop()
+    with open_index(args.index, format=args.format) as index:
+        loaded = perf_counter()
+        results = search(
+            index,
+            args.query,
+            scorer=_scorer_from_name(args.scorer),
+            k=args.k,
+            engine=args.engine,
+        )
+        finished = perf_counter()
 
-    print(f"Engine: {args.engine}")
-    print(f"Query: {args.query}")
-    print(f"Load time: {loaded - load_started:.4f} s")
-    print(f"Search time: {finished - loaded:.4f} s")
-    print(f"Elapsed: {finished - started:.4f} s")
+        print(f"Index: {index!r}")
+        print(f"Scorer: {args.scorer}")
+        print(f"Query: {args.query}")
+        print(f"Load time: {loaded - started:.4f} s")
+        print(f"Search time: {finished - loaded:.4f} s")
+        print(f"Elapsed: {finished - started:.4f} s")
+        print(f"Results: {len(results)}")
+        for result in results:
+            print(result)
+
+        first = index.cache_info()
+        search(
+            index,
+            args.query,
+            scorer=_scorer_from_name(args.scorer),
+            k=args.k,
+            engine=args.engine,
+        )
+        second = index.cache_info()
+        logger.info("cache before repeat: %s", first)
+        logger.info("cache after repeat: %s", second)
+
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
     print(f"Peak memory: {peak:,} bytes ({_format_mib(peak)})")
-    print(f"Results: {len(results)}")
-    for doc_id in results:
-        meta = index.doc_meta[doc_id]
-        print(f"  [{doc_id}] {meta.title} — {meta.path} ({meta.length} tokens)")
 
 
 if __name__ == "__main__":

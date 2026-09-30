@@ -18,8 +18,4 @@ Thumbs.db
 # Local benchmark output
 *.json
 *.csv
-
-# ????????? ????? Lab 2
-.pytest_tmp/
-index*.bin
-index*.json
+*.bin

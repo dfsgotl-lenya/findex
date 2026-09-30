@@ -1,4 +1,5 @@
 import inspect
+from pathlib import Path
 
 from findex.corpus import iter_documents
 
@@ -7,7 +8,7 @@ def test_iter_documents_is_generator_function() -> None:
     assert inspect.isgeneratorfunction(iter_documents)
 
 
-def test_iter_documents_yields_document(tmp_path) -> None:
+def test_iter_documents_yields_document(tmp_path: Path) -> None:
     source = tmp_path / "note.txt"
     source.write_text("Hello Привіт", encoding="utf-8")
 

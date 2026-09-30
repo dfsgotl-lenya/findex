@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import tracemalloc
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from itertools import islice
 from pathlib import Path
 from time import perf_counter
@@ -44,8 +45,10 @@ def eager_stats(root: Path, limit: int | None = None) -> tuple[int, int, Counter
     return len(documents), sum(len(tokens) for tokens in token_lists), counts
 
 
-def _measure(
-    func, root: Path, limit: int | None
+def measure(
+    func: Callable[[Path, int | None], tuple[int, int, Counter[str]]],
+    root: Path,
+    limit: int | None,
 ) -> tuple[tuple[int, int, Counter[str]], float, int]:
     """Run *func* under tracemalloc and perf_counter."""
     tracemalloc.start()
@@ -75,18 +78,17 @@ def main() -> None:
     if args.limit is not None and args.limit < 0:
         parser.error("--limit must be >= 0")
 
-    (doc_count, token_count, counts), elapsed, peak = _measure(
+    (doc_count, token_count, counts), elapsed, peak = measure(
         collect_stats, args.root, args.limit
     )
 
-    print(f"Documents: {doc_count}")
-    print(f"Tokens: {token_count}")
-    print(f"Vocabulary: {len(counts)}")
-    print("Top 50 terms:")
-    for term, count in counts.most_common(50):
-        print(f"  {term}\t{count}")
-    print(f"Elapsed: {elapsed:.4f} s")
-    print(f"Peak memory: {peak:,} bytes ({_format_mib(peak)})")
+    logger = logging.getLogger(__name__)
+    logger.info("documents: %s", doc_count)
+    logger.info("tokens: %s", token_count)
+    logger.info("vocabulary: %s", len(counts))
+    logger.info("top 50 terms: %s", counts.most_common(50))
+    logger.info("elapsed: %.4f s", elapsed)
+    logger.info("peak memory: %s", _format_mib(peak))
 
 
 if __name__ == "__main__":

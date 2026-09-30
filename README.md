@@ -1,4 +1,7 @@
-# findex — лабораторні роботи 1–3
+# findex — лабораторні роботи 1–4
+
+[![CI](https://github.com/dfsgotl-lenya/findex/actions/workflows/ci.yml/badge.svg)](https://github.com/dfsgotl-lenya/findex/actions/workflows/ci.yml)
+[![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=dfsgotl-lenya_findex&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=dfsgotl-lenya_findex)
 
 Навчальний пошуковий рушій `findex`, який поступово розширюється протягом курсу Python.
 
@@ -264,3 +267,143 @@ main
 
 - Lab 3: https://github.com/rmalkevy/Programming-Practice-Projects/blob/main/courses/python/lab-03-the-object-model-and-ranking.md
 - Теорія та досліди: https://github.com/rmalkevy/Programming-Practice-Projects/blob/main/courses/python/lab-03-the-object-model-and-ranking.notes.md
+
+## Лабораторна робота №4
+
+**Тема:** типізація, тестування, пакування та CLI.
+
+### Реалізовано
+
+- строгі типи для публічного API та `Scorer` через `typing.Protocol`;
+- `Iterator` / `Iterable` для потокового API;
+- `Literal` для `engine`, `scorer` та форматів;
+- `pytest` із фікстурою `tests/conftest.py` та параметризованими тестами;
+- property-based тести через Hypothesis;
+- покриття через `pytest-cov`;
+- `pyproject.toml` з PEP 621 метаданими, dev-залежностями та `[project.scripts]`;
+- команда `findex` з підкомандами `index`, `search`, `stats`;
+- Rich progress bar для побудови індексу та Rich table для пошуку;
+- `findex search --json` для JSON Lines у `stdout`;
+- `-v` і `-vv` для рівня логування;
+- діагностика через `logging` у `stderr`;
+- GitHub Actions: Ruff, Ruff format, Pyright strict, pytest + coverage;
+- SonarQube Cloud із coverage report.
+
+### Запуск як встановленого інструмента
+
+```powershell
+uv sync
+uv run findex --help
+```
+
+Побудова індексу:
+
+```powershell
+findex index data/ --out index.bin --positions
+```
+
+Пошук:
+
+```powershell
+findex search index.bin "python AND (search OR token)" --scorer bm25 -k 5
+```
+
+JSON Lines у stdout:
+
+```powershell
+findex search index.bin "python search" --json -k 5 > results.jsonl
+```
+
+Статистика:
+
+```powershell
+findex stats index.bin
+```
+
+Рівні логування:
+
+```powershell
+findex -v search index.bin "python"
+findex -vv search index.bin "python"
+```
+
+### Перевірка типів і тестів
+
+```powershell
+uv run pyright
+uv run ruff check .
+uv run ruff format --check .
+uv run pytest --cov=findex --cov-report=term-missing
+```
+
+Тести, які зазвичай працюють довше секунди, треба запускати з маркером `slow` і за потреби виключати через `-m "not slow"`.
+
+### Пакування
+
+```powershell
+uv build
+```
+
+У каталозі `dist/` з'являться wheel та інші артефакти пакування. Перевірка ізольованого запуску:
+
+```powershell
+uvx --from dist\findex-0.4.0-py3-none-any.whl findex --help
+```
+
+Встановлення як CLI-інструмента:
+
+```powershell
+uv tool install .
+findex --help
+```
+
+### Покриття
+
+Фактичний відсоток покриття залежить від запуску тестового набору. Перед здачею потрібно виконати:
+
+```powershell
+uv run pytest --cov=findex --cov-report=term-missing
+```
+
+і перенести підсумковий відсоток у цей README. Свідомо поза повним покриттям можуть залишитися рідкісні гілки помилок I/O, захист від пошкоджених зовнішніх файлів та окремі compatibility-обгортки старих CLI `python -m ...`.
+
+### CI
+
+CI на GitHub Actions запускає `uv sync`, `ruff check`, `ruff format --check`, `pyright` у strict mode та `pytest` із coverage на кожен push і Pull Request.
+
+
+### Реліз v0.4.0
+
+Після успішного CI та перевірки пакування створюється Git-тег `v0.4.0`. Wheel формується командою `uv build` і прикріплюється до GitHub Release `v0.4.0`.
+
+Команди: 
+
+```powershell
+uv sync
+uv run pyright
+uv run ruff check .
+uv run ruff format --check .
+uv run pytest --cov=findex --cov-report=term-missing
+uv build
+uv tool install dist\findex-0.4.0-py3-none-any.whl
+findex --help
+```
+
+Після перевірки релізу: 
+
+```powershell
+git tag v0.4.0
+git push origin v0.4.0
+```
+
+У GitHub створіть Release `v0.4.0` і прикріпіть wheel з каталогу `dist/`.
+
+### Покриття Lab 4
+
+У контрольному прогоні на базових тестах Lab 1–3 отримано 58% покриття. Остаточне число для звіту потрібно отримати повним запуском Lab 4 після встановлення `hypothesis`, `pytest-cov` та нових CLI-тестів:
+
+```powershell
+uv run pytest --cov=findex --cov-report=term-missing
+```
+
+За межами цільового покриття залишаються переважно рідкісні гілки помилок I/O, пошкоджених зовнішніх файлів та старі compatibility-обгортки `python -m ...`; основний CLI, пошук, парсер, серіалізація і типізований API покриваються тестами.

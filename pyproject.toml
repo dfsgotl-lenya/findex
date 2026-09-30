@@ -1,16 +1,25 @@
 [project]
 name = "findex"
-version = "0.1.0"
-description = "Streaming text corpus intake for a small full-text search engine"
+version = "0.4.0"
+description = "Educational full-text search engine built through Python laboratory exercises"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "rich>=13.9",
+    "typer>=0.16",
+]
 
 [dependency-groups]
 dev = [
+    "hypothesis>=6.140",
+    "pyright>=1.1.390",
     "pytest>=8.0",
+    "pytest-cov>=6.0",
     "ruff>=0.6",
 ]
+
+[project.scripts]
+findex = "findex.cli:app"
 
 [build-system]
 requires = ["uv_build>=0.10.0,<0.11.0"]
@@ -25,3 +34,20 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = [
+    "slow: tests that normally take longer than one second",
+]
+
+[tool.pyright]
+typeCheckingMode = "strict"
+pythonVersion = "3.13"
+include = ["src", "tests"]
+exclude = ["**/__pycache__", ".venv"]
+
+[tool.coverage.run]
+branch = true
+source = ["src/findex"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false

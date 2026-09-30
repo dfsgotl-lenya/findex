@@ -1,9 +1,10 @@
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
 from findex.corpus import Document
-from findex.index import build_index
+from findex.index import Index, build_index
 from findex.query import And, Not, Or, Phrase, Term, parse
 from findex.ranking import BM25, SearchResult, TfIdf
 from findex.search import search
@@ -105,20 +106,27 @@ def test_timed_preserves_metadata() -> None:
     assert sample(1) == 2
 
 
-def test_context_manager_closes_index_on_exception(tmp_path) -> None:
+def test_context_manager_closes_index_on_exception(tmp_path: Path) -> None:
     index = build_index(make_docs(), positions=True)
     path = tmp_path / "index.bin"
     save(index, path)
+    opened: Index | None = None
     with pytest.raises(RuntimeError):
-        with open_index(path) as opened:
-            assert opened.closed is False
+        with open_index(path) as current:
+            opened = current
+            assert current.closed is False
             raise RuntimeError("boom")
+    assert opened is not None
     assert opened.closed is True
 
 
-def test_pickle_and_json_round_trip(tmp_path) -> None:
+def test_pickle_and_json_round_trip(tmp_path: Path) -> None:
     index = build_index(make_docs(), positions=True)
-    for suffix, fmt in ((".bin", "pickle"), (".json", "json")):
+    cases: tuple[tuple[str, Literal["pickle", "json"]], ...] = (
+        (".bin", "pickle"),
+        (".json", "json"),
+    )
+    for suffix, fmt in cases:
         path = tmp_path / f"index{suffix}"
         save(index, path, format=fmt)
         restored = load(path, format=fmt)

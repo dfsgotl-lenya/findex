@@ -34,11 +34,7 @@ def precision_at_5(results, relevant_ids: set[int]) -> float:
 def ids_for_labels(index, labels: set[str]) -> set[int]:
     if labels == COMMON_RELEVANT:
         return set(index.doc_meta)
-    return {
-        doc_id
-        for doc_id, meta in index.doc_meta.items()
-        if meta.title in labels
-    }
+    return {doc_id for doc_id, meta in index.doc_meta.items() if meta.title in labels}
 
 
 def main() -> None:

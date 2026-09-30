@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import logging
 from pathlib import Path
 
-from .stats import _measure, collect_stats, eager_stats
+from .stats import collect_stats, eager_stats, measure
+
+logger = logging.getLogger(__name__)
 
 
 def main() -> None:
@@ -22,25 +25,29 @@ def main() -> None:
     if args.limit is not None and args.limit < 0:
         parser.error("--limit must be >= 0")
 
-    (lazy_result, lazy_time, lazy_peak) = _measure(
-        collect_stats, args.root, args.limit
-    )
-    (eager_result, eager_time, eager_peak) = _measure(
-        eager_stats, args.root, args.limit
-    )
+    (lazy_result, lazy_time, lazy_peak) = measure(collect_stats, args.root, args.limit)
+    (eager_result, eager_time, eager_peak) = measure(eager_stats, args.root, args.limit)
 
-    print("Version | Documents | Tokens | Vocabulary | Peak memory | Elapsed")
-    print("--- | ---: | ---: | ---: | ---: | ---:")
-    print(
-        f"eager (lists) | {eager_result[0]} | {eager_result[1]} | "
-        f"{len(eager_result[2])} | "
-        f"{eager_peak / (1024**2):.2f} MiB | {eager_time:.4f} s"
+    logger.info("Version | Documents | Tokens | Vocabulary | Peak memory | Elapsed")
+    logger.info("--- | ---: | ---: | ---: | ---: | ---:")
+    logger.info(
+        "eager (lists) | %s | %s | %s | %.2f MiB | %.4f s",
+        eager_result[0],
+        eager_result[1],
+        len(eager_result[2]),
+        eager_peak / (1024**2),
+        eager_time,
     )
-    print(
-        f"lazy (generators) | {lazy_result[0]} | {lazy_result[1]} | "
-        f"{len(lazy_result[2])} | {lazy_peak / (1024**2):.2f} MiB | {lazy_time:.4f} s"
+    logger.info(
+        "lazy (generators) | %s | %s | %s | %.2f MiB | %.4f s",
+        lazy_result[0],
+        lazy_result[1],
+        len(lazy_result[2]),
+        lazy_peak / (1024**2),
+        lazy_time,
     )
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     main()

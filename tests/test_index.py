@@ -42,20 +42,22 @@ def test_boolean_search_merge_and_set_match() -> None:
         )
 
 
-def test_pickle_round_trip(tmp_path) -> None:
+def test_pickle_round_trip(tmp_path: Path) -> None:
     index = build_index(make_docs())
     path = tmp_path / "index.bin"
     save(index, path, format="pickle")
     restored = load(path, format="pickle")
-    assert restored == index
+    assert restored.postings == index.postings
+    assert restored.doc_meta == index.doc_meta
 
 
-def test_json_round_trip(tmp_path) -> None:
+def test_json_round_trip(tmp_path: Path) -> None:
     index = build_index(make_docs())
     path = tmp_path / "index.json"
     save(index, path, format="json")
     restored = load(path, format="json")
-    assert restored == index
+    assert restored.postings == index.postings
+    assert restored.doc_meta == index.doc_meta
 
 
 def test_unknown_term_returns_empty() -> None:

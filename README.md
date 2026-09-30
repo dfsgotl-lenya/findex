@@ -143,16 +143,16 @@ uv run python benchmarks/evaluate_lab3.py data/benchmark --limit 300
 
 | Запит | TF-IDF P@5 | BM25 P@5 |
 |---|---:|---:|
-| python | — | — |
-| search | — | — |
-| generators | — | — |
-| tokenizes | — | — |
-| unicode | — | — |
-| raretoken0001 | — | — |
-| raretoken0002 | — | — |
-| raretoken0003 | — | — |
-| raretoken0004 | — | — |
-| raretoken0005 | — | — |
+| python | 1.00 | 1.00 |
+| search | 1.00 | 1.00 |
+| generators | 1.00 | 1.00 |
+| tokenizes | 1.00 | 1.00 |
+| unicode | 1.00 | 1.00 |
+| raretoken0001 | 0.20 | 0.20 |
+| raretoken0002 | 0.20 | 0.20 |
+| raretoken0003 | 0.20 | 0.20 |
+| raretoken0004 | 0.20 | 0.20 |
+| raretoken0005 | 0.20 | 0.20 |
 
 Після запуску `benchmarks/evaluate_lab3.py` підставте фактичні результати для корпусу, який використовується у вашій роботі.
 

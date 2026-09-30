@@ -5,8 +5,6 @@
 
 Навчальний пошуковий рушій `findex`, який поступово розширюється протягом курсу Python.
 
-SonarQube Cloud: https://sonarcloud.io/project/overview?id=dfsgotl-lenya_findex
-
 ## Лабораторна робота №1
 
 **Тема:** ітератори, генератори та корпус текстів.

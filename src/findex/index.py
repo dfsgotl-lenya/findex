@@ -11,12 +11,42 @@ from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
 from time import perf_counter
+from typing import TYPE_CHECKING, Protocol, cast
 
 from .corpus import Document, iter_documents
 from .timing import timed
 from .tokenize import tokenize
 
+if TYPE_CHECKING:
+    from .ranking import Scorer, SearchResult
+
 logger = logging.getLogger(__name__)
+
+
+class CacheInfo(Protocol):
+    """Structural type for ``functools.lru_cache`` statistics."""
+
+    @property
+    def hits(self) -> int: ...
+
+    @property
+    def misses(self) -> int: ...
+
+    @property
+    def maxsize(self) -> int | None: ...
+
+    @property
+    def currsize(self) -> int: ...
+
+
+class QueryCache(Protocol):
+    """Callable query cache exposing the standard LRU cache controls."""
+
+    def __call__(self, query: str) -> frozenset[int]: ...
+
+    def cache_info(self) -> CacheInfo: ...
+
+    def cache_clear(self) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,7 +139,7 @@ class Index(Mapping[str, tuple[Posting, ...]]):
     def closed(self) -> bool:
         return self._closed
 
-    def cache_info(self):
+    def cache_info(self) -> CacheInfo:
         """Return cache statistics for the query-to-document-ID path."""
         return self._cached_query.cache_info()
 
@@ -120,27 +150,33 @@ class Index(Mapping[str, tuple[Posting, ...]]):
         """Parse and evaluate a query, caching the resulting document IDs."""
         return self._cached_query(query)
 
-    def search(self, query: str, *, scorer=None, k: int = 10):
+    def search(
+        self,
+        query: str,
+        *,
+        scorer: Scorer | None = None,
+        k: int = 10,
+    ) -> list[SearchResult] | list[int]:
         """Convenience wrapper around :func:`findex.search.search`."""
         from .ranking import BM25
         from .search import search
 
         return search(self, query, scorer=scorer or BM25(), k=k)
 
-    def __getstate__(self):
+    def __getstate__(self) -> dict[str, object]:
         return {
             "postings": self._postings,
             "doc_meta": self._doc_meta,
             "closed": self._closed,
         }
 
-    def __setstate__(self, state):
-        self._postings = state["postings"]
-        self._doc_meta = state["doc_meta"]
-        self._closed = state.get("closed", False)
+    def __setstate__(self, state: dict[str, object]) -> None:
+        self._postings = cast(dict[str, tuple[Posting, ...]], state["postings"])
+        self._doc_meta = cast(dict[int, DocMeta], state["doc_meta"])
+        self._closed = bool(state.get("closed", False))
         self._cached_query = self._make_cached_query()
 
-    def _make_cached_query(self):
+    def _make_cached_query(self) -> QueryCache:
         from functools import lru_cache
 
         from .query import parse
@@ -258,15 +294,15 @@ def main() -> None:
     _, peak = tracemalloc.get_traced_memory()
     tracemalloc.stop()
 
-    print(f"Index: {index!r}")
-    print(f"Documents: {index.num_docs}")
-    print(f"Vocabulary: {len(index):,}")
-    print(f"Average document length: {index.avg_doc_length:.2f}")
-    print(f"Build time: {built - started:.4f} s")
-    print(f"Save time: {finished - built:.4f} s")
-    print(f"Elapsed: {finished - started:.4f} s")
-    print(f"Peak memory: {peak:,} bytes ({_format_mib(peak)})")
-    print(f"Saved: {args.out}")
+    logger.info("index: %s", index)
+    logger.info("documents: %s", index.num_docs)
+    logger.info("vocabulary: %s", len(index))
+    logger.info("average document length: %.2f", index.avg_doc_length)
+    logger.info("build time: %.4f s", built - started)
+    logger.info("save time: %.4f s", finished - built)
+    logger.info("elapsed: %.4f s", finished - started)
+    logger.info("peak memory: %s", _format_mib(peak))
+    logger.info("saved: %s", args.out)
 
 
 if __name__ == "__main__":

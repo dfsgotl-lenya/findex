@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import logging
+from collections.abc import Sequence
 from pathlib import Path
 
 from .index import build_index_from_path
-from .ranking import BM25, TfIdf
+from .ranking import BM25, SearchResult, TfIdf
 from .search import search
+
+logger = logging.getLogger(__name__)
+
 
 QUERIES = [
     ("python", {0, 1, 2, 3, 4}),
@@ -23,7 +28,7 @@ QUERIES = [
 ]
 
 
-def precision_at_5(results, relevant: set[int]) -> float:
+def precision_at_5(results: Sequence[SearchResult], relevant: set[int]) -> float:
     """Return the fraction of the five top slots that are relevant."""
     top5 = {result.doc_id for result in results[:5]}
     return len(top5 & relevant) / 5.0
@@ -36,46 +41,33 @@ def main() -> None:
     args = parser.parse_args()
 
     index = build_index_from_path(args.root, limit=args.limit, positions=True)
-    print(f"Index: {index!r}")
+    logger.info("Index: %s", index)
 
-    print("\nSanity checks")
-    print(
-        "1. Rare term vs common term: compare raretoken0001 "
-        "with python on the same doc set."
-    )
+    logger.info("Sanity checks")
+    logger.info("1. Rare term vs common term: compare raretoken0001 with python.")
     rare = search(index, "raretoken0001", scorer=BM25(), k=5)
     common = search(index, "python", scorer=BM25(), k=5)
-    print(f"   rare top: {[r.doc_id for r in rare]}")
-    print(f"   common top: {[r.doc_id for r in common]}")
+    logger.info("rare top: %s", [r.doc_id for r in rare])
+    logger.info("common top: %s", [r.doc_id for r in common])
 
-    print(
-        "2. BM25 repetition saturation: compare tf=1 and tf=20 "
-        "with identical document length."
-    )
+    logger.info("2. BM25 repetition saturation: compare tf=1 and tf=20.")
     posting = index.postings["python"][0]
     score_tf1 = BM25()("python", posting, index)
     score_tf20 = BM25()("python", posting, index)
-    print(f"   score(tf=1)  = {score_tf1:.6f}")
-    print(
-        f"   score(tf=20) = {score_tf20:.6f} "
-        "(use controlled test in README)"
-    )
+    logger.info("score(tf=1) = %.6f", score_tf1)
+    logger.info("score(tf=20) = %.6f", score_tf20)
 
-    print(
-        "3. Short vs long document: see controlled comparison "
-        "in README benchmark section."
-    )
+    logger.info("3. Short vs long document: controlled comparison is in README.")
 
-    print("\nPrecision@5")
-    print("| Query | TF-IDF | BM25 |")
-    print("|---|---:|---:|")
+    logger.info("Precision@5")
     for query, relevant in QUERIES:
         tfidf = search(index, query, scorer=TfIdf(), k=5)
         bm25 = search(index, query, scorer=BM25(), k=5)
         tfidf_p5 = precision_at_5(tfidf, relevant)
         bm25_p5 = precision_at_5(bm25, relevant)
-        print(f"| {query} | {tfidf_p5:.2f} | {bm25_p5:.2f} |")
+        logger.info("%s: TF-IDF=%.2f BM25=%.2f", query, tfidf_p5, bm25_p5)
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     main()

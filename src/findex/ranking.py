@@ -13,8 +13,7 @@ from .index import Index, Posting
 class Scorer(Protocol):
     """Protocol for interchangeable scoring models."""
 
-    def __call__(self, term: str, posting: Posting, index: Index) -> float:
-        ...
+    def __call__(self, term: str, posting: Posting, index: Index) -> float: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,13 +41,9 @@ class BM25:
         if df == 0 or index.num_docs == 0 or posting.tf <= 0:
             return 0.0
         avgdl = index.avg_doc_length or 1.0
-        idf = math.log(
-            1.0 + (index.num_docs - df + 0.5) / (df + 0.5)
-        )
+        idf = math.log(1.0 + (index.num_docs - df + 0.5) / (df + 0.5))
         dl = index.doc_length(posting.doc_id)
-        denominator = posting.tf + self.k1 * (
-            1.0 - self.b + self.b * dl / avgdl
-        )
+        denominator = posting.tf + self.k1 * (1.0 - self.b + self.b * dl / avgdl)
         tf_component = posting.tf * (self.k1 + 1.0) / denominator
         return idf * tf_component
 
@@ -78,10 +73,7 @@ class SearchResult:
     snippet: str = field(default="", compare=False)
 
     def __str__(self) -> str:
-        return (
-            f"[{self.doc_id}] {self.title} "
-            f"score={self.score:.4f} — {self.snippet}"
-        )
+        return f"[{self.doc_id}] {self.title} score={self.score:.4f} — {self.snippet}"
 
 
 def top_k(

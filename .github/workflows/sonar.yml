@@ -17,19 +17,16 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.13"
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v6
-
-      - name: Install dependencies
+      - name: Sync environment
         run: uv sync
 
-      - name: Run tests
-        run: uv run pytest
+      - name: Tests with coverage
+        run: uv run pytest --cov=findex --cov-report=xml:coverage.xml
 
       - name: SonarQube Cloud Scan
         uses: SonarSource/sonarqube-scan-action@v6

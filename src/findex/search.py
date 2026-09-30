@@ -8,6 +8,7 @@ import tracemalloc
 from collections.abc import Sequence
 from pathlib import Path
 from time import perf_counter
+from typing import Literal, overload
 
 from .index import DocMeta, Index, Posting
 from .query import And, Not, Or, Phrase, QueryNode, Term, parse
@@ -114,7 +115,7 @@ def boolean_search(
     index: Index,
     query: str,
     *,
-    engine: str = "merge",
+    engine: Literal["merge", "set"] = "merge",
 ) -> list[int]:
     """Evaluate a Boolean query with the Lab 2 merge or set engine."""
     if engine not in {"merge", "set"}:
@@ -129,10 +130,32 @@ def search_with_meta(
     index: Index,
     query: str,
     *,
-    engine: str = "merge",
+    engine: Literal["merge", "set"] = "merge",
 ) -> list[tuple[int, DocMeta]]:
     ids = boolean_search(index, query, engine=engine)
     return [(doc_id, index.doc_meta[doc_id]) for doc_id in ids]
+
+
+@overload
+def search(
+    index: Index,
+    query: str,
+    *,
+    scorer: Scorer,
+    k: int = 10,
+    engine: Literal["merge", "set"] | None = None,
+) -> list[SearchResult]: ...
+
+
+@overload
+def search(
+    index: Index,
+    query: str,
+    *,
+    scorer: None = None,
+    k: int = 10,
+    engine: Literal["merge", "set"] | None = None,
+) -> list[int]: ...
 
 
 @timed
@@ -142,7 +165,7 @@ def search(
     *,
     scorer: Scorer | None = None,
     k: int = 10,
-    engine: str | None = None,
+    engine: Literal["merge", "set"] | None = None,
 ) -> list[SearchResult] | list[int]:
     """Run Boolean compatibility search or ranked search."""
     if scorer is None:
@@ -210,15 +233,15 @@ def main() -> None:
         )
         finished = perf_counter()
 
-        print(f"Index: {index!r}")
-        print(f"Scorer: {args.scorer}")
-        print(f"Query: {args.query}")
-        print(f"Load time: {loaded - started:.4f} s")
-        print(f"Search time: {finished - loaded:.4f} s")
-        print(f"Elapsed: {finished - started:.4f} s")
-        print(f"Results: {len(results)}")
+        logger.info("index: %s", index)
+        logger.info("scorer: %s", args.scorer)
+        logger.info("query: %s", args.query)
+        logger.info("load time: %.4f s", loaded - started)
+        logger.info("search time: %.4f s", finished - loaded)
+        logger.info("elapsed: %.4f s", finished - started)
+        logger.info("results: %s", len(results))
         for result in results:
-            print(result)
+            logger.info("result: %s", result)
 
         first = index.cache_info()
         search(
@@ -234,7 +257,7 @@ def main() -> None:
 
     _, peak = tracemalloc.get_traced_memory()
     tracemalloc.stop()
-    print(f"Peak memory: {peak:,} bytes ({_format_mib(peak)})")
+    logger.info("peak memory: %s", _format_mib(peak))
 
 
 if __name__ == "__main__":

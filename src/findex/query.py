@@ -82,9 +82,7 @@ class Phrase(QueryNode):
         return self.terms
 
 
-def _has_consecutive_positions(
-    position_lists: list[tuple[int, ...]]
-) -> bool:
+def _has_consecutive_positions(position_lists: list[tuple[int, ...]]) -> bool:
     """Check a phrase using repeated two-pointer merges over positions."""
     starts = position_lists[0]
     for offset, positions in enumerate(position_lists[1:], start=1):
@@ -179,8 +177,9 @@ class _Parser:
         if not self.tokens:
             raise ValueError("Empty query")
         node = self.parse_or()
-        if self.current() is not None:
-            raise ValueError(f"Unexpected token: {self.current()[1]}")
+        current = self.current()
+        if current is not None:
+            raise ValueError(f"Unexpected token: {current[1]}")
         return node
 
     def parse_or(self) -> QueryNode:
@@ -198,8 +197,7 @@ class _Parser:
                 self.consume()
                 node = And(node, self.parse_not())
             elif current and (
-                current[0] in {"term", "phrase", "lpar"}
-                or current == ("op", "NOT")
+                current[0] in {"term", "phrase", "lpar"} or current == ("op", "NOT")
             ):
                 node = And(node, self.parse_not())
             else:

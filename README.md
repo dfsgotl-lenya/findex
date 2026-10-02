@@ -1,4 +1,4 @@
-# findex — лабораторні роботи 1–4
+# findex — лабораторні роботи 1–5
 
 [![CI](https://github.com/dfsgotl-lenya/findex/actions/workflows/ci.yml/badge.svg)](https://github.com/dfsgotl-lenya/findex/actions/workflows/ci.yml)
 [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=dfsgotl-lenya_findex&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=dfsgotl-lenya_findex)
@@ -217,7 +217,9 @@ findex/
 │   ├── benchmark_storage.py
 │   ├── measure_lab2.py
 │   ├── sanity_lab3.py
-│   └── evaluate_lab3.py
+│   ├── evaluate_lab3.py
+│   ├── benchmark_parallel.py
+│   └── gil_experiments.py
 ├── data/
 ├── src/findex/
 │   ├── corpus.py
@@ -230,13 +232,288 @@ findex/
 │   ├── ranking.py
 │   ├── query.py
 │   ├── snippets.py
-│   └── timing.py
+│   ├── timing.py
+│   └── parallel.py
 ├── tests/
 ├── pyproject.toml
 ├── sonar-project.properties
 ├── uv.lock
 └── README.md
 ```
+
+
+## Лабораторна робота №5
+
+**Тема:** конкурентність і GIL: потоки, процеси і паралельна індексація.
+
+### Реалізовано
+
+- винесено індексацію одного набору документів у module-level `build_partial()`;
+- додано `merge()` для детермінованого об'єднання partial-індексів;
+- `findex index` підтримує `--workers N` та `--executor {serial,threads,processes}`;
+- для `ProcessPoolExecutor` передаються шляхи до файлів, а не завантажені тексти;
+- для процесів використовується spawn-safe схема;
+- worker exceptions не приховуються та доходять до CLI з traceback;
+- serial, threads і processes дають байт-ідентичний pickle-індекс;
+- додано benchmark із wall time, CPU time, Peak RSS, merge time та speedup;
+- додано графік `docs/lab05_speedup.png`;
+- додано експеримент `benchmarks/gil_experiments.py` для GIL та race condition;
+- перевірено free-threaded Python 3.13 (`3.13t`);
+- default executor встановлено як `processes` після benchmark на власній машині.
+
+### 1. CLI
+
+Довідка команди:
+
+```powershell
+uv run findex index --help
+```
+
+Поточні параметри:
+
+```text
+--workers <int>                    default: 1
+--executor <serial|threads|processes>
+                                   default: processes
+```
+
+Приклад явного serial-запуску:
+
+```powershell
+uv run findex index data/ --out index-serial.bin --workers 1 --executor serial
+```
+
+Паралельний запуск процесами:
+
+```powershell
+uv run findex index data/ --out index-processes.bin --workers 4 --executor processes
+```
+
+Потоковий запуск:
+
+```powershell
+uv run findex index data/ --out index-threads.bin --workers 4 --executor threads
+```
+
+### 2. Детермінованість індексу
+
+Для корпусу з 300 документів були створені три індекси:
+
+- serial, 1 worker;
+- processes, 4 workers;
+- CPython 3.13t, threads, 4 workers.
+
+SHA-256 усіх трьох файлів однаковий:
+
+```text
+456D206D6E6C4BC0DC131530A28B0CE309FCB2F9FE07C4B4EDDE20B331128FEF
+```
+
+Статистика також однакова:
+
+| Показник | Значення |
+|---|---:|
+| Документи | 300 |
+| Словник | 357 |
+| Середня довжина | 5521.00 |
+| Токени | 1,656,300 |
+
+Це підтверджує, що конкурентна побудова не змінює зміст інвертованого індексу.
+
+### 3. Benchmark
+
+Повний запуск:
+
+```powershell
+uv run python benchmarks/benchmark_parallel.py data/ --repeats 3
+```
+
+Параметри машини:
+
+| Параметр | Значення |
+|---|---|
+| OS | Windows 11 10.0.26100 |
+| CPU | Intel64 Family 6 Model 151 Stepping 2 |
+| Фізичні ядра | 12 |
+| Логічні CPU | 20 |
+| Python | 3.13.15 |
+| Варіант | CPython 3.13 (GIL) |
+| Корпус | `data/` |
+| Документів | 300 |
+| Повторів на комірку | 3 |
+
+#### Результати
+
+| Executor | Workers | Wall (s, median) | CPU (s) | Peak RSS (MiB) | Merge (s) | Speedup |
+|---|---:|---:|---:|---:|---:|---:|
+| serial | 1 | 0.9874 | 0.9688 | 70.65 | 0.0017 | 1.00× |
+| threads | 1 | 0.9814 | 0.9531 | 71.80 | 0.0019 | 1.01× |
+| threads | 2 | 0.9703 | 0.9688 | 72.41 | 0.0017 | 1.02× |
+| threads | 4 | 0.9940 | 0.9844 | 72.69 | 0.0017 | 0.99× |
+| threads | 8 | 0.9661 | 0.9844 | 72.85 | 0.0018 | 1.02× |
+| threads | 20 | 0.9183 | 0.9375 | 74.22 | 0.0019 | 1.08× |
+| processes | 1 | 1.2687 | 1.6250 | 75.23 | 0.0016 | 0.78× |
+| processes | 2 | 0.8585 | 1.7656 | 75.68 | 0.0018 | 1.15× |
+| processes | 4 | 0.6720 | 2.6719 | 75.68 | 0.0017 | 1.47× |
+| processes | 8 | 0.6859 | 4.9844 | 75.70 | 0.0021 | 1.44× |
+| processes | 20 | 0.9874 | 16.2344 | 75.80 | 0.0036 | 1.00× |
+
+У цьому запуску найменший wall time отримано для `processes / 4`: `0.6720 s`, speedup `1.47×` відносно serial. Подальше збільшення до 8 процесів не покращило результат, а 20 процесів повернули час до рівня serial через накладні витрати.
+
+Фракція послідовного merge:
+
+```text
+0.17%
+```
+
+Теоретична верхня межа за законом Амдала для цієї частки:
+
+```text
+≈ 585.56×
+```
+
+Графік speedup:
+
+![Lab 5 speedup](docs/lab05_speedup.png)
+
+### 4. GIL і потоки
+
+Експеримент на звичайному CPython 3.13.15:
+
+```powershell
+uv run python benchmarks/gil_experiments.py --n 10000000 --iterations 1000000
+```
+
+Результати:
+
+| Режим | Час |
+|---|---:|
+| one | 0.4273 s |
+| two serial | 0.8637 s |
+| two threads | 0.8886 s |
+| two processes | 0.5312 s |
+
+`sys._is_gil_enabled()` повернув `True`.
+
+Для CPU-bound чистого Python потоки у звичайному CPython не дали справжнього паралельного виконання bytecode, а два процеси дали менший wall time.
+
+### 5. Race condition
+
+Експеримент із `counter += 1`:
+
+```text
+race expected:      2000000
+race unsafe result: 1157000
+race locked result: 2000000
+```
+
+Отже, сам GIL не гарантує коректність користувацьких інваріантів. Спільний mutable state потрібно синхронізувати, наприклад через `threading.Lock`, або уникати спільного стану.
+
+### 6. Free-threaded Python 3.13
+
+Встановлено окремий free-threaded інтерпретатор:
+
+```powershell
+uv python install 3.13t
+```
+
+Перевірка:
+
+```powershell
+uv run --python 3.13t --no-dev python -c "import sys; print(sys.version); print('GIL enabled:', sys._is_gil_enabled())"
+```
+
+Результат:
+
+```text
+CPython 3.13.15+freethreaded
+GIL enabled: False
+```
+
+Через відсутність сумісного wheel для `kiwisolver==1.5.1` у dev-наборі на цьому середовищі free-threaded перевірки запускалися з `--no-dev`; сам GIL-експеримент і CLI індексації не потребують `matplotlib`.
+
+Експеримент на `3.13t`:
+
+```powershell
+uv run --python 3.13t --no-dev python benchmarks/gil_experiments.py --n 10000000 --iterations 1000000
+```
+
+| Режим | Час |
+|---|---:|
+| one | 0.4599 s |
+| two serial | 0.9424 s |
+| two threads | 0.4603 s |
+| two processes | 0.5632 s |
+
+`sys._is_gil_enabled()` повернув `False`. У цьому експерименті два CPU-bound потоки мали wall time `0.4603 s` проти `0.9424 s` для двох послідовних запусків.
+
+Race condition залишився:
+
+```text
+race expected:      2000000
+race unsafe result: 1202847
+race locked result: 2000000
+```
+
+Отже, free-threading не усуває необхідність синхронізації спільного змінюваного стану.
+
+### 7. Threaded indexing на 3.13t
+
+```powershell
+uv run --python 3.13t --no-dev findex index data/ --out index-threads-313t.bin --workers 4 --executor threads
+```
+
+Результат:
+
+```text
+документів: 300
+термів: 357
+```
+
+Статистика:
+
+```text
+середня довжина: 5521.00
+токени: 1,656,300
+```
+
+SHA-256 цього індексу збігся із serial та processes індексами, тому навіть free-threaded threaded build дає той самий детермінований результат.
+
+### 8. Перевірка Lab 5
+
+Фінальний локальний прогін:
+
+```powershell
+uv run ruff check .
+uv run ruff format --check .
+uv run pyright
+uv run pytest --basetemp .pytest_tmp -p no:cacheprovider
+```
+
+Результат:
+
+```text
+Ruff:    All checks passed!
+Format:  32 files already formatted
+Pyright: 0 errors, 0 warnings, 0 informations
+Pytest:  61 passed
+```
+
+### Посилання на методичку Lab 5
+
+- Lab 5: https://github.com/rmalkevy/Programming-Practice-Projects/blob/main/courses/python/lab-05-concurrency-and-the-gil.md
+- Теорія та досліди: https://github.com/rmalkevy/Programming-Practice-Projects/blob/main/courses/python/lab-05-concurrency-and-the-gil.notes.md
+
+### Reflection — Lab 5
+
+1. Чому CPU-bound `findex` не отримує повного прискорення від `ThreadPoolExecutor` у звичайному CPython?
+2. Навіщо для `ProcessPoolExecutor` передавати шляхи до файлів, а не тіла документів?
+3. Чому функції воркерів мають бути module-level і picklable?
+4. Чому `counter += 1` не є достатньо надійним для спільного mutable state?
+5. Що показав експеримент на `3.13t` без GIL?
+6. Чому для 20 процесів швидкодія погіршилась порівняно з 4 процесами?
+7. Що означає послідовний merge для закону Амдала?
+8. Які накладні витрати з'являються при використанні процесів?
 
 ## Git workflow
 
@@ -246,7 +523,9 @@ findex/
 main
  ├── tag lab-01
  ├── lab-02 → PR → main → tag lab-02
- └── lab-03 → PR → main → tag lab-03
+ ├── lab-03 → PR → main → tag lab-03
+ ├── lab-04 → PR → main → tag lab-04
+ └── lab-05 → PR → main → tag lab-05
 ```
 
 Корпус у `data/` не комітиться.

@@ -5,10 +5,8 @@ from __future__ import annotations
 import json
 import logging
 import pickle
+import time
 from collections import Counter
-from collections.abc import Iterable, Iterator
-from dataclasses import asdict
-from itertools import islice
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -18,14 +16,12 @@ from rich.progress import (
     BarColumn,
     Progress,
     SpinnerColumn,
-    TaskID,
     TextColumn,
     TimeRemainingColumn,
 )
 from rich.table import Table
 
-from .corpus import Document, iter_documents
-from .index import Index, build_index
+from .parallel import ExecutorName, build_parallel_index, collect_document_paths
 from .ranking import BM25, Scorer, SearchResult, TfIdf
 from .search import search
 from .store import open_index, save
@@ -68,52 +64,8 @@ def _validate_limit(limit: int | None) -> None:
         raise ValueError("--limit має бути >= 0")
 
 
-def _count_documents(root: Path, limit: int | None) -> int | None:
-    if root.is_file():
-        return 1 if limit is None or limit > 0 else 0
-    total = sum(1 for _ in root.rglob("*.txt"))
-    return min(total, limit) if limit is not None else total
-
-
-def _iter_with_progress(
-    documents: Iterable[Document],
-    progress: Progress,
-    task_id: TaskID,
-) -> Iterator[Document]:
-    for document in documents:
-        progress.advance(task_id)
-        yield document
-
-
-def _index_documents(
-    corpus: Path,
-    *,
-    limit: int | None,
-    positions: bool,
-) -> Index:
-    total = _count_documents(corpus, limit)
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("{task.description}"),
-        BarColumn(),
-        TextColumn("{task.completed}/{task.total}"),
-        TimeRemainingColumn(),
-        console=console,
-    ) as progress:
-        task_id = TaskID(
-            progress.add_task(
-                "Побудова індексу",
-                total=total,
-            )
-        )
-        if limit is not None:
-            documents: Iterator[Document] = islice(iter_documents(corpus), limit)
-        else:
-            documents = iter_documents(corpus)
-        return build_index(
-            _iter_with_progress(documents, progress, task_id),
-            positions=positions,
-        )
+def _count_documents(root: Path, limit: int | None) -> int:
+    return len(collect_document_paths(root, limit=limit))
 
 
 def _scorer_from_name(name: ScorerName) -> Scorer:
@@ -140,7 +92,17 @@ def _render_results(results: list[SearchResult]) -> None:
 
 def _json_lines(results: list[SearchResult]) -> None:
     for result in results:
-        typer.echo(json.dumps(asdict(result), ensure_ascii=False))
+        typer.echo(
+            json.dumps(
+                {
+                    "doc_id": result.doc_id,
+                    "score": result.score,
+                    "title": result.title,
+                    "snippet": result.snippet,
+                },
+                ensure_ascii=False,
+            )
+        )
 
 
 @app.callback()
@@ -177,26 +139,87 @@ def index_command(
         IndexFormat | None,
         typer.Option("--format", help="Формат серіалізації."),
     ] = None,
+    workers: Annotated[
+        int,
+        typer.Option("--workers", min=1, help="Кількість воркерів."),
+    ] = 1,
+    executor: Annotated[
+        ExecutorName,
+        typer.Option("--executor", help="Модель виконання."),
+    ] = "processes",
 ) -> None:
     """Побудувати та зберегти інвертований індекс."""
     try:
         _validate_corpus_path(corpus)
         _validate_limit(limit)
-        index = _index_documents(corpus, limit=limit, positions=positions)
-        save(index, out, format=format)
-        console.print(
-            f"Індекс збережено: {out} | документів: {index.num_docs} | "
-            f"термів: {len(index):,}"
-        )
-    except (
-        OSError,
-        ValueError,
-        TypeError,
-        EOFError,
-        pickle.UnpicklingError,
-    ) as exc:
+    except (OSError, ValueError, TypeError) as exc:
         error_console.print(f"Помилка: {exc}")
         raise typer.Exit(code=1) from None
+
+    total = _count_documents(corpus, limit)
+    progress_total = max(min(workers, total) if executor != "serial" else 1, 1)
+    completed_chunks = 0
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("{task.description}"),
+        BarColumn(),
+        TextColumn("{task.completed}/{task.total}"),
+        TimeRemainingColumn(),
+        console=console,
+    ) as progress:
+        task_id = progress.add_task(
+            f"Побудова індексу: {executor}/{workers}",
+            total=progress_total,
+        )
+
+        def on_partial_complete() -> None:
+            nonlocal completed_chunks
+            completed_chunks += 1
+            progress.update(
+                task_id,
+                completed=min(progress_total, completed_chunks),
+            )
+
+        started = time.perf_counter()
+        # Worker exceptions are intentionally not caught here: the caller
+        # must see the propagated worker traceback instead of a silent hang.
+        result = build_parallel_index(
+            corpus,
+            workers=workers,
+            executor=executor,
+            positions=positions,
+            limit=limit,
+            on_partial_complete=on_partial_complete,
+        )
+        save_started = time.perf_counter()
+        try:
+            save(result.index, out, format=format)
+        except (
+            OSError,
+            ValueError,
+            TypeError,
+            EOFError,
+            pickle.UnpicklingError,
+        ) as exc:
+            error_console.print(f"Помилка: {exc}")
+            raise typer.Exit(code=1) from None
+        save_time = time.perf_counter() - save_started
+        wall = time.perf_counter() - started
+
+    if total == 0:
+        console.print("Індекс порожній: у корпусі немає .txt документів.")
+    else:
+        console.print(
+            f"Індекс збережено: {out} | документів: "
+            f"{result.index.num_docs} | термів: {len(result.index):,}"
+        )
+    logger.info("executor: %s", executor)
+    logger.info("workers: %d", workers)
+    logger.info("build time: %.4f s", result.build_time)
+    logger.info("merge time: %.4f s", result.merge_time)
+    logger.info("save time: %.4f s", save_time)
+    logger.info("wall time: %.4f s", wall)
 
 
 @app.command("search")
@@ -274,7 +297,7 @@ def stats_command(
             table.add_row("Токени", f"{sum(counts.values()):,}")
             console.print(table)
 
-            top = Table(title="Топ-10 термів")
+            top = Table(title="Топ-50 термів")
             top.add_column("Терм")
             top.add_column("Частота", justify="right")
             for term, count in counts.most_common(50):

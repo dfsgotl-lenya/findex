@@ -31,7 +31,7 @@ def iter_documents(root: Path) -> Iterator[Document]:
     if root.is_file() and root.suffix.lower() == ".txt":
         paths: Iterator[Path] = iter((root,))
     elif root.is_dir():
-        paths = root.rglob("*.txt")
+        paths = iter(sorted(root.rglob("*.txt")))
     else:
         logger.warning("Corpus path is not a directory or .txt file: %s", root)
         return

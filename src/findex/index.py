@@ -78,9 +78,9 @@ class Index(Mapping[str, tuple[Posting, ...]]):
     ) -> None:
         self._postings: dict[str, tuple[Posting, ...]] = {
             str(term): tuple(sorted(items, key=lambda posting: posting.doc_id))
-            for term, items in postings.items()
+            for term, items in sorted(postings.items(), key=lambda item: str(item[0]))
         }
-        self._doc_meta: dict[int, DocMeta] = dict(doc_meta)
+        self._doc_meta: dict[int, DocMeta] = dict(sorted(doc_meta.items()))
         self._closed = False
         self._cached_query = self._make_cached_query()
 

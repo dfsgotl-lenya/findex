@@ -15,6 +15,7 @@ from pathlib import Path
 from time import perf_counter
 from typing import Literal
 
+from .corpus import DocumentRef, JsonlDocumentRef, read_document_reference
 from .index import DocMeta, Index, Posting
 from .tokenize import tokenize
 
@@ -38,26 +39,21 @@ class ParallelBuildResult:
     merge_time: float
 
 
-def collect_document_paths(root: Path, limit: int | None = None) -> list[Path]:
-    """Collect sorted UTF-8 text paths without reading document contents."""
-    root = Path(root)
-    if root.is_file():
-        paths = [root] if root.suffix.lower() == ".txt" else []
-    elif root.is_dir():
-        paths = sorted(root.rglob("*.txt"))
-    else:
-        paths = []
+def collect_document_paths(root: Path, limit: int | None = None) -> list[DocumentRef]:
+    """Collect lightweight document references without retaining document text."""
+    from .corpus import iter_document_refs
 
-    return paths[:limit] if limit is not None else paths
+    return list(iter_document_refs(Path(root), limit=limit))
 
 
 def _index_one_file(
-    path: Path,
+    reference: DocumentRef,
     doc_id: int,
     positions: bool,
 ) -> tuple[DocMeta, dict[str, Posting]]:
-    """Read one file and build its term-frequency map."""
-    text = path.read_text(encoding="utf-8", errors="strict")
+    """Read one text file or one JSONL record and build its term map."""
+    document = read_document_reference(reference)
+    text = document.text
     counts: dict[str, int] = {}
     position_map: dict[str, list[int]] = {}
     length = 0
@@ -76,17 +72,28 @@ def _index_one_file(
         )
         for term, tf in counts.items()
     }
+    meta_path = document.path.as_posix()
+    if isinstance(reference, JsonlDocumentRef):
+        source_url = document.source_url or document.doc_id
+        meta_path = (
+            f"{meta_path}::jsonl-offset:{reference.byte_offset}::url:{source_url}"
+        )
     meta = DocMeta(
         doc_id=doc_id,
-        path=path.as_posix(),
-        title=path.stem,
+        path=meta_path,
+        title=document.title
+        or (
+            Path(reference.path).stem
+            if isinstance(reference, JsonlDocumentRef)
+            else Path(reference).stem
+        ),
         length=length,
     )
     return meta, per_document
 
 
 def build_partial(
-    doc_paths: list[Path],
+    doc_paths: list[DocumentRef],
     start_doc_id: int = 0,
     positions: bool = False,
 ) -> PartialIndex:
@@ -101,7 +108,7 @@ def build_partial(
 
     for offset, path in enumerate(doc_paths):
         doc_id = start_doc_id + offset
-        meta, per_document = _index_one_file(Path(path), doc_id, positions)
+        meta, per_document = _index_one_file(path, doc_id, positions)
         doc_meta[doc_id] = meta
         for term, posting in per_document.items():
             posting_lists.setdefault(term, []).append(posting)
@@ -130,13 +137,15 @@ def merge(partials: Iterable[PartialIndex]) -> Index:
     return Index(postings=canonical, doc_meta=dict(sorted(doc_meta.items())))
 
 
-def _make_chunks(paths: list[Path], workers: int) -> list[tuple[list[Path], int]]:
+def _make_chunks(
+    paths: list[DocumentRef], workers: int
+) -> list[tuple[list[DocumentRef], int]]:
     """Split paths while reserving contiguous global document-ID ranges."""
     if not paths:
         return []
     worker_count = max(1, min(workers, len(paths)))
     size, remainder = divmod(len(paths), worker_count)
-    chunks: list[tuple[list[Path], int]] = []
+    chunks: list[tuple[list[DocumentRef], int]] = []
     cursor = 0
     start_doc_id = 0
 
@@ -151,7 +160,7 @@ def _make_chunks(paths: list[Path], workers: int) -> list[tuple[list[Path], int]
 
 
 def _run_serial(
-    chunks: list[tuple[list[Path], int]],
+    chunks: list[tuple[list[DocumentRef], int]],
     positions: bool,
     on_complete: Callable[[], None] | None,
 ) -> list[PartialIndex]:
@@ -165,7 +174,7 @@ def _run_serial(
 
 def _run_pool(
     executor: ThreadPoolExecutor | ProcessPoolExecutor,
-    chunks: list[tuple[list[Path], int]],
+    chunks: list[tuple[list[DocumentRef], int]],
     positions: bool,
     on_complete: Callable[[], None] | None,
 ) -> list[PartialIndex]:

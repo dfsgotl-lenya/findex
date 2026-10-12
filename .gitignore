@@ -16,6 +16,8 @@ Thumbs.db
 /data/
 
 # Local benchmark output
+/crawl.log
+/data/lab06-benchmark/
 *.json
 *.csv
 *.bin
@@ -23,3 +25,5 @@ Thumbs.db
 coverage.xml
 htmlcov/
 dist/
+
+.pytest_tmp_lab06/

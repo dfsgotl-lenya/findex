@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import pickle
 import time
 from collections import Counter
+from logging.handlers import QueueHandler, QueueListener
 from pathlib import Path
-from typing import Annotated, Literal
+from queue import SimpleQueue
+from typing import Annotated, Literal, TextIO
 
 import typer
 from rich.console import Console
@@ -21,6 +24,8 @@ from rich.progress import (
 )
 from rich.table import Table
 
+from .crawler import CrawlStats
+from .crawler import crawl as async_crawl
 from .parallel import ExecutorName, build_parallel_index, collect_document_paths
 from .ranking import BM25, Scorer, SearchResult, TfIdf
 from .search import search
@@ -55,8 +60,8 @@ def configure_logging(verbosity: int) -> None:
 def _validate_corpus_path(path: Path) -> None:
     if not path.exists():
         raise ValueError(f"корпус не знайдено: {path}")
-    if path.is_file() and path.suffix.lower() != ".txt":
-        raise ValueError(f"очікувався каталог або .txt файл: {path}")
+    if path.is_file() and path.suffix.lower() not in {".txt", ".jsonl"}:
+        raise ValueError(f"очікувався каталог, .txt або .jsonl файл: {path}")
 
 
 def _validate_limit(limit: int | None) -> None:
@@ -122,7 +127,9 @@ def _root(
 
 @app.command("index")
 def index_command(
-    corpus: Annotated[Path, typer.Argument(help="Каталог або .txt файл корпусу.")],
+    corpus: Annotated[
+        Path, typer.Argument(help="Каталог або файл .txt/.jsonl корпусу.")
+    ],
     out: Annotated[
         Path,
         typer.Option("--out", help="Куди зберегти індекс."),
@@ -208,7 +215,7 @@ def index_command(
         wall = time.perf_counter() - started
 
     if total == 0:
-        console.print("Індекс порожній: у корпусі немає .txt документів.")
+        console.print("Індекс порожній: у корпусі немає .txt/.jsonl документів.")
     else:
         console.print(
             f"Індекс збережено: {out} | документів: "
@@ -220,6 +227,174 @@ def index_command(
     logger.info("merge time: %.4f s", result.merge_time)
     logger.info("save time: %.4f s", save_time)
     logger.info("wall time: %.4f s", wall)
+
+
+def _write_crawl_record(handle: TextIO, record: dict[str, str | int | float]) -> None:
+    """Serialize and flush one JSONL record off the event-loop thread."""
+    handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    handle.flush()
+
+
+@app.command("crawl")
+def crawl_command(
+    seed_url: Annotated[str, typer.Argument(help="Початкова HTTP(S) адреса.")],
+    contact: Annotated[
+        str,
+        typer.Option("--contact", help="Контактний email автора краулера."),
+    ],
+    max_pages: Annotated[
+        int,
+        typer.Option(
+            "--max-pages", min=1, help="Максимальна кількість URL, які можна відвідати."
+        ),
+    ] = 500,
+    concurrency: Annotated[
+        int,
+        typer.Option(
+            "--concurrency", min=1, help="Глобальна кількість одночасних запитів."
+        ),
+    ] = 10,
+    per_host: Annotated[
+        int,
+        typer.Option(
+            "--per-host", min=1, help="Максимум одночасних запитів до одного host."
+        ),
+    ] = 2,
+    per_host_delay: Annotated[
+        float,
+        typer.Option(
+            "--per-host-delay",
+            min=0,
+            help="Мінімальний інтервал запитів до одного host.",
+        ),
+    ] = 0.2,
+    timeout: Annotated[
+        float,
+        typer.Option("--timeout", min=0.1, help="Таймаут одного fetch у секундах."),
+    ] = 10.0,
+    out: Annotated[
+        Path,
+        typer.Option("--out", help="JSONL файл, у який потоково записуються сторінки."),
+    ] = Path("data/crawl.jsonl"),
+    allowed_domain: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--allowed-domain",
+            help="Дозволений host/domain; параметр можна повторювати.",
+        ),
+    ] = None,
+    log_file: Annotated[
+        Path,
+        typer.Option("--log-file", help="Файл детального логу кожного URL."),
+    ] = Path("crawl.log"),
+) -> None:
+    """Асинхронно зібрати HTML-сторінки у потоковий JSONL корпус."""
+    from urllib.parse import urlsplit
+
+    from .crawler.urls import canonicalize_url, normalize_domains
+
+    try:
+        seed = canonicalize_url(seed_url)
+        if not contact.strip() or "\r" in contact or "\n" in contact:
+            raise ValueError("--contact має містити дійсну контактну адресу")
+        if "@" not in contact and not contact.startswith(("https://", "http://")):
+            raise ValueError(
+                "--contact має бути email-адресою або HTTP(S) контактною сторінкою"
+            )
+        if max_pages < 1 or concurrency < 1 or per_host < 1:
+            raise ValueError("max_pages, concurrency і per_host мають бути >= 1")
+        if per_host_delay < 0 or timeout <= 0:
+            raise ValueError("per-host-delay має бути >= 0, timeout має бути > 0")
+    except ValueError as exc:
+        error_console.print(f"Помилка: {exc}")
+        raise typer.Exit(code=2) from None
+
+    domains = normalize_domains(allowed_domain or [urlsplit(seed).hostname or ""])
+    contact_value = contact if contact.startswith("http") else f"mailto:{contact}"
+    user_agent = (
+        f"findex-lab6/1.0 (+https://github.com/dfsgotl-lenya/findex; "
+        f"contact={contact_value})"
+    )
+    out.parent.mkdir(parents=True, exist_ok=True)
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+
+    crawler_logger = logging.getLogger("findex.crawler")
+    previous_level = crawler_logger.level
+    previous_propagate = crawler_logger.propagate
+    file_handler = logging.FileHandler(log_file, mode="w", encoding="utf-8")
+    file_handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s %(levelname)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+        )
+    )
+    log_queue: SimpleQueue[logging.LogRecord] = SimpleQueue()
+    queue_handler = QueueHandler(log_queue)
+    listener = QueueListener(log_queue, file_handler, respect_handler_level=True)
+    crawler_logger.addHandler(queue_handler)
+    crawler_logger.setLevel(logging.INFO)
+    crawler_logger.propagate = False
+    listener.start()
+
+    async def run_crawl() -> tuple[int, int, float]:
+        started = time.perf_counter()
+        last_pages = 0
+        last_errors = 0
+        with out.open("w", encoding="utf-8", newline="\n") as handle:
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("{task.description}"),
+                BarColumn(),
+                TextColumn("{task.completed}/{task.total}"),
+                TimeRemainingColumn(),
+                console=console,
+            ) as progress:
+                task_id = progress.add_task("Краул", total=max_pages)
+
+                def show_progress(stats: CrawlStats) -> None:
+                    nonlocal last_pages, last_errors
+                    last_pages = stats.pages
+                    last_errors = stats.errors
+                    progress.update(
+                        task_id,
+                        completed=min(max_pages, stats.pages),
+                        description=(
+                            f"pages={stats.pages} | {stats.pages_per_second:.1f}/s | "
+                            f"in-flight={stats.in_flight} | errors={stats.errors} | "
+                            f"queue={stats.queue_depth}"
+                        ),
+                    )
+
+                async for page in async_crawl(
+                    [seed],
+                    max_pages=max_pages,
+                    concurrency=concurrency,
+                    per_host=per_host,
+                    per_host_delay=per_host_delay,
+                    timeout=timeout,
+                    allowed_domains=domains,
+                    user_agent=user_agent,
+                    on_progress=show_progress,
+                ):
+                    await asyncio.to_thread(
+                        _write_crawl_record, handle, page.as_json_dict()
+                    )
+        elapsed = time.perf_counter() - started
+        return last_pages, last_errors, elapsed
+
+    try:
+        pages, errors, elapsed = asyncio.run(run_crawl(), debug=True)
+    finally:
+        listener.stop()
+        crawler_logger.removeHandler(queue_handler)
+        file_handler.close()
+        crawler_logger.setLevel(previous_level)
+        crawler_logger.propagate = previous_propagate
+
+    rate = pages / elapsed if elapsed > 0 else 0.0
+    console.print(
+        f"Краул завершено: сторінок={pages}, помилок={errors}, "
+        f"час={elapsed:.2f}s, швидкість={rate:.2f} стор./с, JSONL={out}, log={log_file}"
+    )
 
 
 @app.command("search")

@@ -3,8 +3,17 @@
 [![CI](https://github.com/dfsgotl-lenya/findex/actions/workflows/ci.yml/badge.svg)](https://github.com/dfsgotl-lenya/findex/actions/workflows/ci.yml)
 [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=dfsgotl-lenya_findex&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=dfsgotl-lenya_findex)
 
-Навчальний пошуковий рушій `findex`, який поступово розширюється протягом курсу Python.
+Навчальний повнотекстовий пошуковий рушій `findex`, який поступово розширюється протягом курсу Python — від потокової обробки корпусу до ранжування, строгих типів, CLI, тестування, пакування та паралельної індексації.
 
+## Підсумок лабораторних
+
+| Lab | Тема | Основний результат |
+|---|---|---|
+| 1 | Ітератори, генератори, корпус текстів | Потоковий `iter_documents()`, Unicode NFC + `casefold()`, статистика та порівняння lazy/eager |
+| 2 | Інвертований індекс, hash tables, пам'ять | `Posting`/`DocMeta`, Boolean-пошук, `pickle`/`JSON`, порівняння `plain`/`slots`/`array('I')` |
+| 3 | Об'єктна модель і ranking | `Mapping`-подібний `Index`, TF-IDF/BM25, Boolean AST, cache, snippets, Precision@5 |
+| 4 | Типізація, тестування, CLI, packaging | Strict typing, Hypothesis, coverage, Typer/Rich, CI, пакет `findex 0.4.0` |
+| 5 | Конкурентність і GIL | serial/threads/processes, benchmark, byte-identical індекси, GIL і free-threaded `3.13t` |
 
 ## Лабораторна робота №1
 
@@ -153,94 +162,167 @@ uv run python benchmarks/evaluate_lab3.py data/benchmark --limit 300
 | raretoken0004 | 0.20 | 0.20 |
 | raretoken0005 | 0.20 | 0.20 |
 
-Після запуску `benchmarks/evaluate_lab3.py` підставте фактичні результати для корпусу, який використовується у вашій роботі.
-
 Після запуску значення з власної машини треба вставити сюди.
 
-## Зауваження щодо pickle
+### Reflection — Lab 3
 
-`pickle` зручний для швидкої серіалізації Python-об'єктів, але завантаження чужого або підмінного `.bin` є небезпечним: під час десеріалізації pickle може виконувати код через механізм відновлення об'єктів. Тому `pickle`-файл потрібно завантажувати лише з довіреного джерела. Для менш довіреного обміну використовується JSON.
+1. Що викликають `len(index)`, `term in index` та `index[term]`?
+2. Чим `typing.Protocol` відрізняється від ABC?
+3. Навіщо `functools.wraps` у `@timed`?
+4. Як структурно відрізняється декоратор із параметрами?
+5. Що відбувається до і після `yield` у `@contextmanager`?
+6. Що контролюють `k1` і `b` у BM25?
+7. Чому `heapq.nlargest(k, ...)`, а не `sorted(...)[:k]`?
+8. Чому `a OR b c` парситься як `Or(a, And(b, c))`?
 
-## Запуск
+## Лабораторна робота №4
 
-У корені проєкту:
+**Тема:** типізація, тестування, пакування та CLI.
+
+### Реалізовано
+
+- строгі типи для публічного API та `Scorer` через `typing.Protocol`;
+- `Iterator` / `Iterable` для потокового API;
+- `Literal` для `engine`, `scorer` та форматів;
+- `pytest` із фікстурою `tests/conftest.py` та параметризованими тестами;
+- property-based тести через Hypothesis;
+- покриття через `pytest-cov`;
+- `pyproject.toml` з PEP 621 метаданими, dev-залежностями та `[project.scripts]`;
+- команда `findex` з підкомандами `index`, `search`, `stats`;
+- Rich progress bar для побудови індексу та Rich table для пошуку;
+- `findex search --json` для JSON Lines у `stdout`;
+- `-v` і `-vv` для рівня логування;
+- діагностика через `logging` у `stderr`;
+- GitHub Actions: Ruff, Ruff format, Pyright strict, pytest + coverage;
+- SonarQube Cloud із coverage report.
+
+### Фактичні результати Lab 4
+
+- версія пакета: `findex 0.4.0`;
+- зібрано wheel та source distribution командою `uv build`;
+- CLI має підкоманди `index`, `search`, `stats`;
+- у контрольному прогоні coverage Lab 4 зафіксовано `58%`;
+- CI запускає Ruff, Ruff format, Pyright strict та pytest + coverage;
+- SonarQube Cloud використовується для перевірки Quality Gate.
+
+### Запуск як встановленого інструмента
 
 ```powershell
 uv sync
-uv run pytest
-uv run ruff check .
-```
-
-Створення demo-корпусу:
-
-```powershell
-uv run python benchmarks/make_demo_corpus.py data/benchmark --documents 300 --copies-per-document 80
+uv run findex --help
 ```
 
 Побудова індексу:
 
 ```powershell
-uv run python -m findex.index data/benchmark --out index.bin --positions
+findex index data/ --out index.bin --positions
 ```
 
 Пошук:
 
 ```powershell
-uv run python -m findex.search index.bin 'python AND (search OR token) NOT java "search engine"' -k 10
+findex search index.bin "python AND (search OR token)" --scorer bm25 -k 5
 ```
 
-JSON:
+JSON Lines у stdout:
 
 ```powershell
-uv run python -m findex.index data/benchmark --out index.json --format json --positions
-uv run python -m findex.search index.json "python search" -k 10
+findex search index.bin "python search" --json -k 5 > results.jsonl
 ```
 
-Контекстний API:
+Статистика:
 
-```python
-from findex.store import open_index
-from findex.ranking import BM25
-
-with open_index("index.bin") as index:
-    results = index.search("python search", scorer=BM25(), k=5)
+```powershell
+findex stats index.bin
 ```
 
-## Структура
+Рівні логування:
 
-```text
-findex/
-├── .github/workflows/sonar.yml
-├── benchmarks/
-│   ├── make_demo_corpus.py
-│   ├── benchmark_search.py
-│   ├── benchmark_storage.py
-│   ├── measure_lab2.py
-│   ├── sanity_lab3.py
-│   ├── evaluate_lab3.py
-│   ├── benchmark_parallel.py
-│   └── gil_experiments.py
-├── data/
-├── src/findex/
-│   ├── corpus.py
-│   ├── tokenize.py
-│   ├── stats.py
-│   ├── benchmark.py
-│   ├── index.py
-│   ├── search.py
-│   ├── store.py
-│   ├── ranking.py
-│   ├── query.py
-│   ├── snippets.py
-│   ├── timing.py
-│   └── parallel.py
-├── tests/
-├── pyproject.toml
-├── sonar-project.properties
-├── uv.lock
-└── README.md
+```powershell
+findex -v search index.bin "python"
+findex -vv search index.bin "python"
 ```
 
+### Перевірка типів і тестів
+
+```powershell
+uv run pyright
+uv run ruff check .
+uv run ruff format --check .
+uv run pytest --cov=findex --cov-report=term-missing
+```
+
+Тести, які зазвичай працюють довше секунди, треба запускати з маркером `slow` і за потреби виключати через `-m "not slow"`.
+
+### Пакування
+
+```powershell
+uv build
+```
+
+У каталозі `dist/` з'являться wheel та інші артефакти пакування. Перевірка ізольованого запуску:
+
+```powershell
+uvx --from dist\findex-0.4.0-py3-none-any.whl findex --help
+```
+
+Встановлення як CLI-інструмента:
+
+```powershell
+uv tool install .
+findex --help
+```
+
+### Покриття
+
+Фактичний відсоток покриття залежить від запуску тестового набору. Перед здачею потрібно виконати:
+
+```powershell
+uv run pytest --cov=findex --cov-report=term-missing
+```
+
+і перенести підсумковий відсоток у цей README. Свідомо поза повним покриттям можуть залишитися рідкісні гілки помилок I/O, захист від пошкоджених зовнішніх файлів та окремі compatibility-обгортки старих CLI `python -m ...`.
+
+### CI
+
+CI на GitHub Actions запускає `uv sync`, `ruff check`, `ruff format --check`, `pyright` у strict mode та `pytest` із coverage на кожен push і Pull Request.
+
+
+### Реліз v0.4.0
+
+Після успішного CI та перевірки пакування створюється Git-тег `v0.4.0`. Wheel формується командою `uv build` і прикріплюється до GitHub Release `v0.4.0`.
+
+Команди: 
+
+```powershell
+uv sync
+uv run pyright
+uv run ruff check .
+uv run ruff format --check .
+uv run pytest --cov=findex --cov-report=term-missing
+uv build
+uv tool install dist\findex-0.4.0-py3-none-any.whl
+findex --help
+```
+
+Після перевірки релізу: 
+
+```powershell
+git tag v0.4.0
+git push origin v0.4.0
+```
+
+У GitHub створіть Release `v0.4.0` і прикріпіть wheel з каталогу `dist/`.
+
+### Покриття Lab 4
+
+У контрольному прогоні на базових тестах Lab 1–3 отримано 58% покриття. Остаточне число для звіту потрібно отримати повним запуском Lab 4 після встановлення `hypothesis`, `pytest-cov` та нових CLI-тестів:
+
+```powershell
+uv run pytest --cov=findex --cov-report=term-missing
+```
+
+За межами цільового покриття залишаються переважно рідкісні гілки помилок I/O, пошкоджених зовнішніх файлів та старі compatibility-обгортки `python -m ...`; основний CLI, пошук, парсер, серіалізація і типізований API покриваються тестами.
 
 ## Лабораторна робота №5
 
@@ -259,7 +341,7 @@ findex/
 - додано графік `docs/lab05_speedup.png`;
 - додано експеримент `benchmarks/gil_experiments.py` для GIL та race condition;
 - перевірено free-threaded Python 3.13 (`3.13t`);
-- default executor встановлено як `processes` після benchmark на власній машині.
+- default executor встановлено як `processes` після benchmark на використаній машині.
 
 ### 1. CLI
 
@@ -515,9 +597,93 @@ Pytest:  61 passed
 7. Що означає послідовний merge для закону Амдала?
 8. Які накладні витрати з'являються при використанні процесів?
 
+## Зауваження щодо pickle
+
+`pickle` зручний для швидкої серіалізації Python-об'єктів, але завантаження чужого або підмінного `.bin` є небезпечним: під час десеріалізації pickle може виконувати код через механізм відновлення об'єктів. Тому `pickle`-файл потрібно завантажувати лише з довіреного джерела. Для менш довіреного обміну використовується JSON.
+
+## Запуск
+
+У корені проєкту:
+
+```powershell
+uv sync
+uv run pytest
+uv run ruff check .
+```
+
+Створення demo-корпусу:
+
+```powershell
+uv run python benchmarks/make_demo_corpus.py data/benchmark --documents 300 --copies-per-document 80
+```
+
+Побудова індексу:
+
+```powershell
+uv run python -m findex.index data/benchmark --out index.bin --positions
+```
+
+Пошук:
+
+```powershell
+uv run python -m findex.search index.bin 'python AND (search OR token) NOT java "search engine"' -k 10
+```
+
+JSON:
+
+```powershell
+uv run python -m findex.index data/benchmark --out index.json --format json --positions
+uv run python -m findex.search index.json "python search" -k 10
+```
+
+Контекстний API:
+
+```python
+from findex.store import open_index
+from findex.ranking import BM25
+
+with open_index("index.bin") as index:
+    results = index.search("python search", scorer=BM25(), k=5)
+```
+
+## Структура
+
+```text
+findex/
+├── .github/workflows/sonar.yml
+├── benchmarks/
+│   ├── make_demo_corpus.py
+│   ├── benchmark_search.py
+│   ├── benchmark_storage.py
+│   ├── measure_lab2.py
+│   ├── sanity_lab3.py
+│   ├── evaluate_lab3.py
+│   ├── benchmark_parallel.py
+│   └── gil_experiments.py
+├── data/
+├── src/findex/
+│   ├── corpus.py
+│   ├── tokenize.py
+│   ├── stats.py
+│   ├── benchmark.py
+│   ├── index.py
+│   ├── search.py
+│   ├── store.py
+│   ├── ranking.py
+│   ├── query.py
+│   ├── snippets.py
+│   ├── timing.py
+│   └── parallel.py
+├── tests/
+├── pyproject.toml
+├── sonar-project.properties
+├── uv.lock
+└── README.md
+```
+
 ## Git workflow
 
-Лабораторні розділяються гілками та Pull Request у тому самому публічному репозиторії:
+Лабораторні розділяються окремими гілками та Pull Request у тому самому публічному репозиторії:
 
 ```text
 main
@@ -530,158 +696,126 @@ main
 
 Корпус у `data/` не комітиться.
 
-## Reflection — Lab 3
-
-1. Що викликають `len(index)`, `term in index` та `index[term]`?
-2. Чим `typing.Protocol` відрізняється від ABC?
-3. Навіщо `functools.wraps` у `@timed`?
-4. Як структурно відрізняється декоратор із параметрами?
-5. Що відбувається до і після `yield` у `@contextmanager`?
-6. Що контролюють `k1` і `b` у BM25?
-7. Чому `heapq.nlargest(k, ...)`, а не `sorted(...)[:k]`?
-8. Чому `a OR b c` парситься як `Or(a, And(b, c))`?
-
-## Посилання на методичку
+## Посилання на методички
 
 - Lab 3: https://github.com/rmalkevy/Programming-Practice-Projects/blob/main/courses/python/lab-03-the-object-model-and-ranking.md
-- Теорія та досліди: https://github.com/rmalkevy/Programming-Practice-Projects/blob/main/courses/python/lab-03-the-object-model-and-ranking.notes.md
+- Теорія та досліди Lab 3: https://github.com/rmalkevy/Programming-Practice-Projects/blob/main/courses/python/lab-03-the-object-model-and-ranking.notes.md
+- Lab 5: https://github.com/rmalkevy/Programming-Practice-Projects/blob/main/courses/python/lab-05-concurrency-and-the-gil.md
+- Теорія та досліди Lab 5: https://github.com/rmalkevy/Programming-Practice-Projects/blob/main/courses/python/lab-05-concurrency-and-the-gil.notes.md
 
-## Лабораторна робота №4
+## Примітка щодо числових результатів
 
-**Тема:** типізація, тестування, пакування та CLI.
+У README залишені лише результати, які були зафіксовані в матеріалах роботи та фактичних запусках проєкту. Для Lab 1 у вихідному README є опис реалізованих можливостей, але окремі числові значення lazy/eager та `tracemalloc` не збережені, тому вони не вигадуються.
+
+## Лабораторна робота №6
+
+**Тема:** асинхронний краулер — `asyncio`, HTTP-запити, `TaskGroup`, черги, семафори та потоковий JSONL.
 
 ### Реалізовано
 
-- строгі типи для публічного API та `Scorer` через `typing.Protocol`;
-- `Iterator` / `Iterable` для потокового API;
-- `Literal` для `engine`, `scorer` та форматів;
-- `pytest` із фікстурою `tests/conftest.py` та параметризованими тестами;
-- property-based тести через Hypothesis;
-- покриття через `pytest-cov`;
-- `pyproject.toml` з PEP 621 метаданими, dev-залежностями та `[project.scripts]`;
-- команда `findex` з підкомандами `index`, `search`, `stats`;
-- Rich progress bar для побудови індексу та Rich table для пошуку;
-- `findex search --json` для JSON Lines у `stdout`;
-- `-v` і `-vv` для рівня логування;
-- діагностика через `logging` у `stderr`;
-- GitHub Actions: Ruff, Ruff format, Pyright strict, pytest + coverage;
-- SonarQube Cloud із coverage report.
+- `findex crawl` — асинхронний генератор сторінок на основі `asyncio.Queue` і `asyncio.TaskGroup`;
+- один глобальний семафор, окремі семафори на origin і мінімальний інтервал між запитами до того самого origin;
+- HTTP-клієнт `httpx.AsyncClient`, `asyncio.timeout`, обмежені повтори для `429`, `5xx` і таймаутів, exponential backoff, jitter та `Retry-After`;
+- ручна обробка редиректів із блокуванням циклів і переходів за межі allowlist;
+- `RobotsCache` — кеш robots policy для кожного origin; недоступний/помилковий `robots.txt` блокує краул, `404/410` означає, що правил немає;
+- canonicalization URL: lower-case схема/host, прибрані fragment і trailing slash, відсортовані query-параметри;
+- `seen` для запобігання дублям і верхня межа `--max-pages`;
+- витягування title, тексту й посилань через стандартний `html.parser`;
+- JSONL записується рядок за рядком; серіалізація/запис виводяться в `asyncio.to_thread`, а індексація залишається окремою командою;
+- `Rich` live counters: сторінки, pages/s, запити in-flight, помилки й глибина черги;
+- `crawl.log` містить статус, кількість байтів, час запиту та номер спроби;
+- тести для HTTP виконуються через `httpx.MockTransport`, без живої мережі.
 
-### Запуск як встановленого інструмента
+### Дозвіл на краул і User-Agent
+
+Для перевірки та benchmark використовується **локальне дзеркало, створене `benchmarks/local_mirror.py` і прив'язане лише до `127.0.0.1`**. Воно знаходиться під контролем автора проєкту; його `robots.txt` дозволяє обхід. Зовнішній сайт для benchmark не використовується. User-Agent вказує репозиторій та контакт, переданий через обов'язковий `--contact`. Якщо запускаєте краулер на будь-якому публічному сайті, робіть це лише з дозволом, перевірте його robots.txt і вкажіть власний реальний email.
+
+### Запуск краулера
+
+У першому PowerShell вікні запустіть локальне дзеркало щонайменше на 250 сторінок:
 
 ```powershell
-uv sync
-uv run findex --help
+uv run python benchmarks/local_mirror.py --pages 250 --delay 0.01
 ```
 
-Побудова індексу:
+Дзеркало навмисно має невелику затримку відповіді, щоб було видно різницю між конкурентністю 1, 5 і 20. Воно слухає лише loopback-інтерфейс.
+
+У другому вікні:
 
 ```powershell
-findex index data/ --out index.bin --positions
+uv run findex crawl http://127.0.0.1:8765/page/0 --contact YOUR_REAL_EMAIL@example.com --max-pages 200 --concurrency 20 --per-host 20 --per-host-delay 0 --out data/crawl.jsonl --log-file crawl.log
 ```
 
-Пошук:
+Замініть `YOUR_REAL_EMAIL@example.com` на свою справжню контактну адресу. Для звичайного краулу defaults залишаються обережнішими: `--per-host 2` та `--per-host-delay 0.2`. У benchmark локального дзеркала per-host limit навмисно послаблюється, бо цей сервер належить автору проєкту.
+
+Після завершення краулу індекс будується **поза event loop**. JSONL обробляється по одному рядку як по одному документу:
 
 ```powershell
-findex search index.bin "python AND (search OR token)" --scorer bm25 -k 5
+uv run findex index data/crawl.jsonl --out index-crawl.bin --workers 4 --executor processes
+uv run findex search index-crawl.bin "asyncio" -k 5
 ```
 
-JSON Lines у stdout:
+### Benchmark: concurrency 1 / 5 / 20
+
+Залиште локальне дзеркало запущеним. Команда використовує той самий seed, той самий `max_pages=200`, три повтори й ті самі per-host параметри для всіх варіантів:
 
 ```powershell
-findex search index.bin "python search" --json -k 5 > results.jsonl
+uv run python benchmarks/benchmark_crawl.py --contact YOUR_REAL_EMAIL@example.com --max-pages 200 --repeats 3 --per-host 20 --per-host-delay 0
 ```
 
-Статистика:
+Скрипт вимірює wall time, сторінки за секунду, помилки з URL-логів і Peak RSS. Markdown-таблиця також записується до `data/lab06-benchmark/table.md`; після запуску перенесіть **реальні рядки з вашої машини** в таблицю нижче.
+
+| Concurrency | Pages (median) | Wall (s, median) | Pages/s | Errors (median) | Peak RSS (MiB, median) |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 200 | 4.218 | 47.42 | — | 5.43 MiB |
+| 5 | 200 | 2.182 | 91.67 | — | 5.43 MiB |
+| 20 | 200 | 2.078 | 96.25 | — | 5.43 MiB |
+
+Не підставляйте в цю таблицю числа з іншого комп'ютера — результати залежать від затримки дзеркала, Python, ОС і навантаження машини.
+
+### Інтерпретація
+
+Краулер майже весь час очікує мережеву відповідь. `asyncio` дає одному потоку перемикатися на інші задачі в `await`, поки сокет чекає відповіді. Це відрізняється від Lab 5: індексація CPU-bound, тому там процеси допомагають виконувати Python-код паралельно; у краулері процеси не потрібні для перекриття мережевих очікувань.
+
+Обмеження на host зменшує максимальну швидкість, особливо коли сторінки беруться з одного домену. Воно залишається заради ввічливого навантаження на сервер і дотримання robots policy. Значення `--per-host 20 --per-host-delay 0` використовуються **тільки** для локального дзеркала в контрольованому benchmark, а не як рекомендовані налаштування для публічних сайтів.
+
+Якби токенізація та індексація запускалися всередині корутини синхронним CPU-кодом, event loop не міг би перемикатися на інші запити до завершення цієї роботи. Тому краулер витягує текст, пише JSONL потоково, а `findex index` запускається окремо після завершення мережевого обходу.
+
+### Приклад обробленого збою: HTTP 429
+
+Локальне дзеркало має endpoint `/flaky429`: він повертає один `429` з `Retry-After: 0`, а наступний запит успішний. Для відтворення виконайте:
 
 ```powershell
-findex stats index.bin
+uv run findex crawl http://127.0.0.1:8765/flaky429 --contact YOUR_REAL_EMAIL@example.com --max-pages 2 --concurrency 2 --per-host 2 --per-host-delay 0 --out data/failure-example.jsonl --log-file docs/lab06_failure.log
 ```
 
-Рівні логування:
+Приклад фактичних рядків з локального тестового запуску (час і `elapsed` у вашому запуску відрізнятимуться):
 
-```powershell
-findex -v search index.bin "python"
-findex -vv search index.bin "python"
+```text
+INFO url=http://127.0.0.1:8765/flaky429 status=429 bytes=0 elapsed=0.004s attempt=1
+WARNING url=http://127.0.0.1:8765/flaky429 status=429 action=retry delay=0.000s attempt=1/3
+INFO url=http://127.0.0.1:8765/flaky429 status=200 bytes=105 elapsed=0.004s attempt=2
 ```
 
-### Перевірка типів і тестів
+Тобто `429` не завершив увесь краул: клієнт виконав одну повторну спробу згідно з `Retry-After`, записав фінальну успішну сторінку, а лог залишив обидва статуси.
+
+### Перевірки Lab 6
 
 ```powershell
-uv run pyright
 uv run ruff check .
 uv run ruff format --check .
-uv run pytest --cov=findex --cov-report=term-missing
-```
-
-Тести, які зазвичай працюють довше секунди, треба запускати з маркером `slow` і за потреби виключати через `-m "not slow"`.
-
-### Пакування
-
-```powershell
-uv build
-```
-
-У каталозі `dist/` з'являться wheel та інші артефакти пакування. Перевірка ізольованого запуску:
-
-```powershell
-uvx --from dist\findex-0.4.0-py3-none-any.whl findex --help
-```
-
-Встановлення як CLI-інструмента:
-
-```powershell
-uv tool install .
-findex --help
-```
-
-### Покриття
-
-Фактичний відсоток покриття залежить від запуску тестового набору. Перед здачею потрібно виконати:
-
-```powershell
-uv run pytest --cov=findex --cov-report=term-missing
-```
-
-і перенести підсумковий відсоток у цей README. Свідомо поза повним покриттям можуть залишитися рідкісні гілки помилок I/O, захист від пошкоджених зовнішніх файлів та окремі compatibility-обгортки старих CLI `python -m ...`.
-
-### CI
-
-CI на GitHub Actions запускає `uv sync`, `ruff check`, `ruff format --check`, `pyright` у strict mode та `pytest` із coverage на кожен push і Pull Request.
-
-
-### Реліз v0.4.0
-
-Після успішного CI та перевірки пакування створюється Git-тег `v0.4.0`. Wheel формується командою `uv build` і прикріплюється до GitHub Release `v0.4.0`.
-
-Команди: 
-
-```powershell
-uv sync
 uv run pyright
-uv run ruff check .
-uv run ruff format --check .
-uv run pytest --cov=findex --cov-report=term-missing
-uv build
-uv tool install dist\findex-0.4.0-py3-none-any.whl
-findex --help
+uv run pytest --basetemp .pytest_tmp -p no:cacheprovider
 ```
 
-Після перевірки релізу: 
+Методичка: [Lab 6 — Asyncio crawler](https://github.com/rmalkevy/Programming-Practice-Projects/blob/main/courses/python/lab-06-asyncio-crawler.md) · [Нотатки](https://github.com/rmalkevy/Programming-Practice-Projects/blob/main/courses/python/lab-06-asyncio-crawler.notes.md)
 
-```powershell
-git tag v0.4.0
-git push origin v0.4.0
-```
+### Reflection — Lab 6
 
-У GitHub створіть Release `v0.4.0` і прикріпіть wheel з каталогу `dist/`.
-
-### Покриття Lab 4
-
-У контрольному прогоні на базових тестах Lab 1–3 отримано 58% покриття. Остаточне число для звіту потрібно отримати повним запуском Lab 4 після встановлення `hypothesis`, `pytest-cov` та нових CLI-тестів:
-
-```powershell
-uv run pytest --cov=findex --cov-report=term-missing
-```
-
-За межами цільового покриття залишаються переважно рідкісні гілки помилок I/O, пошкоджених зовнішніх файлів та старі compatibility-обгортки `python -m ...`; основний CLI, пошук, парсер, серіалізація і типізований API покриваються тестами.
+1. Що відбувається в event loop, коли корутина доходить до `await` на читанні сокета?
+2. Чому `time.sleep()` блокує інші задачі, а `asyncio.sleep()` — ні?
+3. Чому `TaskGroup` краще пасує до керованих worker-задач, ніж fire-and-forget?
+4. Чому треба одночасно обмежувати глобальну конкурентність і кількість запитів до одного host?
+5. Як `Retry-After` змінює звичайний exponential backoff?
+6. Чому `counter += 1` і спільний змінюваний стан вимагають синхронізації, навіть якщо програма асинхронна?
+7. Чому індексація має виконуватися після краулу, а не всередині корутини?

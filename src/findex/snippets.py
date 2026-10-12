@@ -2,14 +2,30 @@
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
+from typing import cast
 
 
 def _read_text(path: str) -> str:
+    marker = "::jsonl-offset:"
     try:
+        if marker in path:
+            jsonl_path, details = path.split(marker, maxsplit=1)
+            offset_text = details.split("::url:", maxsplit=1)[0]
+            with Path(jsonl_path).open("rb") as handle:
+                handle.seek(int(offset_text))
+                parsed: object = json.loads(
+                    handle.readline().decode("utf-8", errors="strict")
+                )
+            if not isinstance(parsed, dict):
+                return ""
+            record = cast(dict[str, object], parsed)
+            text = record.get("text", "")
+            return text if isinstance(text, str) else ""
         return Path(path).read_text(encoding="utf-8")
-    except (OSError, UnicodeError):
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
         return ""
 
 

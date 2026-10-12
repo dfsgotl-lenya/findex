@@ -233,10 +233,16 @@ def build_index(
                 )
             )
 
+        source_path = document.path.as_posix()
+        if document.jsonl_offset is not None:
+            source_url = document.source_url or document.doc_id
+            source_path = (
+                f"{source_path}::jsonl-offset:{document.jsonl_offset}::url:{source_url}"
+            )
         doc_meta[doc_id] = DocMeta(
             doc_id=doc_id,
-            path=document.path.as_posix(),
-            title=document.path.stem,
+            path=source_path,
+            title=document.title or document.path.stem,
             length=length,
         )
 

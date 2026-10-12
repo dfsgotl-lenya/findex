@@ -1,4 +1,4 @@
-# findex — лабораторні роботи 1–5
+# findex — лабораторні роботи 1–6
 
 [![CI](https://github.com/dfsgotl-lenya/findex/actions/workflows/ci.yml/badge.svg)](https://github.com/dfsgotl-lenya/findex/actions/workflows/ci.yml)
 [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=dfsgotl-lenya_findex&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=dfsgotl-lenya_findex)

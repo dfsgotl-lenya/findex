@@ -767,9 +767,9 @@ uv run python benchmarks/benchmark_crawl.py --contact YOUR_REAL_EMAIL@example.co
 
 | Concurrency | Pages (median) | Wall (s, median) | Pages/s | Errors (median) | Peak RSS (MiB, median) |
 |---:|---:|---:|---:|---:|---:|
-| 1 | — | — | — | — | — |
-| 5 | — | — | — | — | — |
-| 20 | — | — | — | — | — |
+| 1 | 200 | 4.218 | 47.42 | — | 5.43 MiB |
+| 5 | 200 | 2.182 | 91.67 | — | 5.43 MiB |
+| 20 | 200 | 2.078 | 96.25 | — | 5.43 MiB |
 
 Не підставляйте в цю таблицю числа з іншого комп'ютера — результати залежать від затримки дзеркала, Python, ОС і навантаження машини.
 

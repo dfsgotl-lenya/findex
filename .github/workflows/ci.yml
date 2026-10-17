@@ -31,3 +31,22 @@ jobs:
 
       - name: Pytest and coverage
         run: uv run pytest --cov=findex --cov-report=term-missing --cov-report=xml:coverage.xml
+
+      - name: Benchmarks (pytest-benchmark)
+        run: |
+          set -o pipefail
+          uv run pytest tests/test_benchmarks.py --benchmark-enable --benchmark-only \
+            --benchmark-json=benchmark.json --benchmark-columns=min,mean,median,ops \
+            | tee benchmark.txt
+          {
+            echo '### pytest-benchmark'
+            echo '```'
+            grep -E '^(Name|test_bench|-)' benchmark.txt || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-${{ github.sha }}
+          path: benchmark.json

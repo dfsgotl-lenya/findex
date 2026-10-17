@@ -18,6 +18,7 @@ from .timing import timed
 from .tokenize import tokenize
 
 if TYPE_CHECKING:
+    from .arrays import VectorScorer
     from .ranking import Scorer, SearchResult
 
 logger = logging.getLogger(__name__)
@@ -57,6 +58,12 @@ class Posting:
     tf: int
     positions: tuple[int, ...] = ()
 
+    def __reduce__(self) -> tuple[type[Posting], tuple[int, int, tuple[int, ...]]]:
+        # Lab 8 hotspot #1: the generated __getstate__/__setstate__ of a
+        # slots dataclass call dataclasses.fields() for every one of ~500k
+        # postings. Rebuilding through the constructor is ~2.5x faster.
+        return (Posting, (self.doc_id, self.tf, self.positions))
+
 
 @dataclass(frozen=True, slots=True)
 class DocMeta:
@@ -83,6 +90,7 @@ class Index(Mapping[str, tuple[Posting, ...]]):
         self._doc_meta: dict[int, DocMeta] = dict(sorted(doc_meta.items()))
         self._closed = False
         self._cached_query = self._make_cached_query()
+        self._vectors: VectorScorer | None = None
 
     @property
     def postings(self) -> Mapping[str, tuple[Posting, ...]]:
@@ -139,6 +147,14 @@ class Index(Mapping[str, tuple[Posting, ...]]):
     def closed(self) -> bool:
         return self._closed
 
+    def vector_scorer(self) -> VectorScorer:
+        """NumPy copy of the postings (Lab 8), built on first use and reused."""
+        if self._vectors is None:
+            from .arrays import ArrayIndex, VectorScorer
+
+            self._vectors = VectorScorer(ArrayIndex.from_index(self))
+        return self._vectors
+
     def cache_info(self) -> CacheInfo:
         """Return cache statistics for the query-to-document-ID path."""
         return self._cached_query.cache_info()
@@ -175,6 +191,7 @@ class Index(Mapping[str, tuple[Posting, ...]]):
         self._doc_meta = cast(dict[int, DocMeta], state["doc_meta"])
         self._closed = bool(state.get("closed", False))
         self._cached_query = self._make_cached_query()
+        self._vectors = None
 
     def _make_cached_query(self) -> QueryCache:
         from functools import lru_cache

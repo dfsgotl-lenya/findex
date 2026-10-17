@@ -12,7 +12,8 @@ from dataclasses import dataclass
 
 from ..index import Index
 from ..query import parse
-from ..ranking import BM25, Scorer, SearchResult, TfIdf, score_terms, top_k
+from ..ranking import BM25, Scorer, SearchResult, TfIdf
+from ..search import rank
 from ..snippets import read_document_text, snippet_spans, source_url
 from .models import (
     DocumentResponse,
@@ -83,8 +84,7 @@ def search_page(
         raise QueryError(str(exc)) from exc
 
     terms = tree.positive_terms()
-    scores = score_terms(index, terms, matched, scorer_from_name(scorer))
-    ranked = top_k(scores, index, page * k)
+    ranked = rank(index, terms, matched, scorer_from_name(scorer), page * k)
     window = ranked[(page - 1) * k : page * k]
 
     hits: list[Hit] = []

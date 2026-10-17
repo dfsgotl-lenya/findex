@@ -5,11 +5,27 @@ from __future__ import annotations
 import json
 import re
 from collections import Counter
+from functools import lru_cache
 from pathlib import Path
 from typing import cast
 
 
+@lru_cache(maxsize=512)
 def _read_text(path: str) -> str:
+    """Full text behind a ``DocMeta.path``; cached (Lab 8 hotspot #2).
+
+    Every search result used to reopen the JSONL file and ``json.loads`` the
+    whole record. Popular documents come back again and again, so the most
+    recent 512 texts (~9 MB for PEPs) stay in memory.
+    """
+    return _read_text_uncached(path)
+
+
+def clear_text_cache() -> None:
+    _read_text.cache_clear()
+
+
+def _read_text_uncached(path: str) -> str:
     marker = "::jsonl-offset:"
     try:
         if marker in path:

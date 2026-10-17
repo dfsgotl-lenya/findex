@@ -1,7 +1,7 @@
 """Workload for Scalene / py-spy: load the index, then run 200 searches.
 
-    uv run scalene run --cpu-only benchmarks/profile_search_workload.py
-    uv run scalene view --cli
+uv run scalene run --cpu-only benchmarks/profile_search_workload.py
+uv run scalene view --cli
 """
 
 from __future__ import annotations

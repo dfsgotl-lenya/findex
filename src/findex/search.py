@@ -176,8 +176,7 @@ def search(
     tree = parse(query)
     matched = index.evaluate_query(query)
     terms = tree.positive_terms()
-    scores = score_terms(index, terms, matched, scorer)
-    results = top_k(scores, index, k)
+    results = rank(index, terms, matched, scorer, k)
 
     enriched: list[SearchResult] = []
     for result in results:
@@ -192,6 +191,33 @@ def search(
         )
     logger.info("query cache: %s", index.cache_info())
     return enriched
+
+
+def rank(
+    index: Index,
+    terms: tuple[str, ...],
+    matched: frozenset[int] | set[int],
+    scorer: Scorer,
+    k: int,
+    *,
+    vectorized: bool = True,
+) -> list[SearchResult]:
+    """Score matched documents and keep the best ``k``.
+
+    BM25 and TF-IDF use the NumPy scorer from Lab 8; any other ``Scorer``
+    (and ``vectorized=False``) takes the Lab 3 per-posting Python path. Both
+    produce the same ranking — ``tests/test_arrays.py`` checks it.
+    """
+    if vectorized and isinstance(scorer, (BM25, TfIdf)):
+        from .arrays import vector_top_k
+
+        try:
+            vectors = index.vector_scorer()
+        except ValueError:  # sparse doc ids: keep the Lab 3 path
+            vectors = None
+        if vectors is not None:
+            return vector_top_k(vectors, terms, matched, scorer, k)
+    return top_k(score_terms(index, terms, matched, scorer), index, k)
 
 
 def _scorer_from_name(name: str) -> Scorer:

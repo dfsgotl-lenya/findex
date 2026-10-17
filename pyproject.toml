@@ -12,6 +12,7 @@ dependencies = [
     "uvicorn[standard]>=0.54.0",
     "jinja2>=3.1.6",
     "pydantic-settings>=2.16.0",
+    "numpy>=2.5.3",
 ]
 
 [dependency-groups]
@@ -24,6 +25,9 @@ dev = [
     "psutil>=6.0",
     "matplotlib>=3.8",
     "httpx2>=2.13.1",
+    "py-spy>=0.4.2",
+    "scalene>=2.3.0",
+    "pytest-benchmark>=5.3.0",
 ]
 
 [project.scripts]
@@ -41,7 +45,7 @@ select = ["E", "F", "I", "UP", "B"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+addopts = "-q --benchmark-disable"
 markers = [
     "slow: tests that normally take longer than one second",
 ]

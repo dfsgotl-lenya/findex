@@ -1,955 +1,298 @@
-# findex — лабораторні роботи 1–7
+# findex
 
-**Жива адреса:** _буде тут після деплою на Render (див. «Деплой» у Lab 7)_ · API: `/docs`
+**Повнотекстовий і семантичний пошук по всіх 744 Python Enhancement Proposals, написаний з нуля — від токенізатора до веб-сервісу — за 8 лабораторних курсу Python.**
+
+**Жива версія:** _адреса з'явиться після деплою на Render — див. [Деплой](#деплой)_ · API: `/docs` · **Відео (2–3 хв):** _посилання додати після запису_
 
 [![CI](https://github.com/dfsgotl-lenya/findex/actions/workflows/ci.yml/badge.svg)](https://github.com/dfsgotl-lenya/findex/actions/workflows/ci.yml)
 [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=dfsgotl-lenya_findex&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=dfsgotl-lenya_findex)
 
-Навчальний повнотекстовий пошуковий рушій `findex`, який поступово розширюється протягом курсу Python — від потокової обробки корпусу до ранжування, строгих типів, CLI, тестування, пакування та паралельної індексації.
+![Пошук у findex: ключові слова, пошук за змістом, гібрид і перегляд документа](docs/demo.gif)
 
-## Підсумок лабораторних
-
-| Lab | Тема | Основний результат |
+| Корпус | p95 під навантаженням | Найбільше прискорення |
 |---|---|---|
-| 1 | Ітератори, генератори, корпус текстів | Потоковий `iter_documents()`, Unicode NFC + `casefold()`, статистика та порівняння lazy/eager |
-| 2 | Інвертований індекс, hash tables, пам'ять | `Posting`/`DocMeta`, Boolean-пошук, `pickle`/`JSON`, порівняння `plain`/`slots`/`array('I')` |
-| 3 | Об'єктна модель і ranking | `Mapping`-подібний `Index`, TF-IDF/BM25, Boolean AST, cache, snippets, Precision@5 |
-| 4 | Типізація, тестування, CLI, packaging | Strict typing, Hypothesis, coverage, Typer/Rich, CI, пакет `findex 0.4.0` |
-| 5 | Конкурентність і GIL | serial/threads/processes, benchmark, byte-identical індекси, GIL і free-threaded `3.13t` |
-| 6 | asyncio-краулер | `TaskGroup`, семафори, robots.txt, повтори з backoff, потоковий JSONL |
-| 7 | FastAPI, Pydantic, Docker, деплой | HTTP API + сторінка пошуку, `findex serve`, Dockerfile, Render, навантажувальні тести `oha` |
+| **744 PEP**, 13 МБ тексту, 31 753 терми, 481 435 постингів, 11 402 фрагменти з ембедингами | **351 мс** при 50 одночасних клієнтах, 1 процес, 190 запитів/с (у v0.7.0 було 1 526 мс і 44 запити/с) | **24.5×** — BM25 на NumPy проти Python-циклу (OR-запит, корпус ×10) |
 
-## Лабораторна робота №1
+## Що вміє
 
-**Тема:** ітератори, генератори та корпус текстів.
+- **Пошук за словами:** Boolean-мова (`AND`, `OR`, `NOT`, дужки, `"фрази"`), ранжування BM25 або TF-IDF, сніпети з підсвіткою.
+- **Пошук за змістом:** запит і фрагменти документів перетворюються на вектори (WordLlama), близькість — косинусна. Запит «run python threads truly in parallel» знаходить PEP 703 про GIL, хоча слів «GIL» чи «lock» у ньому немає.
+- **Гібрид:** обидва рейтинги зливаються через Reciprocal Rank Fusion.
+- **Веб:** HTTP API з OpenAPI-документацією, сторінка з пошуком під час набору (htmx), перегляд документа.
+- **Інфраструктура:** CLI `findex`, асинхронний краулер, паралельна індексація, Docker-образ, CI з типами, тестами (167 тестів, покриття 79 %) і бенчмарками.
 
-Реалізовано `iter_documents()`, потоковий `tokenize()` з Unicode NFC та `casefold()`, однопрохідну статистику, `--limit`, `tracemalloc` і порівняння lazy/eager.
+## Як це влаштовано
 
-## Лабораторна робота №2
+```mermaid
+flowchart LR
+    A["Корпус<br/>.txt / JSONL<br/><i>Lab 1</i>"] --> T
+    C["Краулер<br/>asyncio, robots.txt<br/><i>Lab 6</i>"] -->|JSONL| T
+    T["Токенізатор<br/>NFC + casefold, генератори<br/><i>Lab 1</i>"] --> I
+    I["Інвертований індекс<br/>dataclass + slots, процеси<br/><i>Lab 2, 5</i>"] --> Q
+    Q["Мова запитів<br/>AND/OR/NOT, фрази<br/><i>Lab 3</i>"] --> S
+    I --> N["Постинги NumPy<br/>CSR int32<br/><i>Lab 8</i>"]
+    N --> S["Скорер<br/>BM25 / TF-IDF<br/><i>Lab 3 → 8</i>"]
+    I --> E["Фрагменти → ембединги<br/>E @ q, RRF<br/><i>Lab 8</i>"]
+    S --> API
+    E --> API["FastAPI + Pydantic<br/><i>Lab 7</i>"]
+    API --> UI["Сторінка Jinja2 + htmx<br/><i>Lab 7</i>"]
+    API --> D["Docker → Render<br/><i>Lab 7</i>"]
+```
 
-**Тема:** інвертований індекс, словники, хешування та пам'ять.
+Шлях запиту: uvicorn → middleware (request id, лог) → валідація параметрів Pydantic → `Depends(get_index)` → парсер запиту → Boolean-фільтр (кешований) → NumPy-скорер або `E @ q` → top-k через `np.argpartition` → сніпети → Pydantic-відповідь або HTML.
 
-Реалізовано `Posting`/`DocMeta` через `@dataclass(frozen=True, slots=True)`, інвертований індекс через `defaultdict`, Boolean-пошук `AND/OR/NOT`, двигуни `merge/set`, `pickle` + `JSON` та порівняння `plain/slots/array('I')`.
+## Швидкий старт
 
-### Результати Lab 2
+```bash
+uv sync
+# корпус PEP лежить у репозиторії (4 МБ, gzip)
+uv run python -c "import gzip,shutil,pathlib; pathlib.Path('data').mkdir(exist_ok=True); shutil.copyfileobj(gzip.open('corpus/peps.jsonl.gz'), open('data/peps.jsonl','wb'))"
+uv run findex index data/peps.jsonl --out data/peps.bin --positions --workers 4   # ~6 с
+uv run findex embed data/peps.bin                                                # ~20 с, без мережі
+uv run findex search data/peps.bin "global interpreter lock" -k 5
+uv run findex search data/peps.bin "run python threads truly in parallel" --mode hybrid
+uv run findex serve --index data/peps.bin        # http://127.0.0.1:8000
+```
 
-#### Merge vs set
+Або в Docker (індекс і ембединги будуються під час збірки):
 
-| Терм | Група | Двигун | Результатів | Загальний час (с) | Середній час (мс) |
-|---|---|---|---:|---:|---:|
-| токен | common | merge | 300 | 0.000959 | 0.0048 |
-| токен | common | set | 300 | 0.000969 | 0.0048 |
-| пошук | common | merge | 300 | 0.000998 | 0.0050 |
-| пошук | common | set | 300 | 0.000950 | 0.0047 |
-| raretoken0001 | rare | merge | 1 | 0.000193 | 0.0010 |
-| raretoken0001 | rare | set | 1 | 0.000205 | 0.0010 |
-| raretoken0002 | rare | merge | 1 | 0.000200 | 0.0010 |
-| raretoken0002 | rare | set | 1 | 0.000201 | 0.0010 |
+```bash
+docker build -t findex . && docker run --rm -p 8000:8000 findex
+```
 
-#### Серіалізація
+## API
+
+| Маршрут | Що повертає |
+|---|---|
+| `GET /search?q=&k=&page=&scorer=bm25\|tfidf&mode=keyword\|semantic\|hybrid` | сторінка результатів: `total`, `pages`, `took_ms`, `results[{doc_id, title, score, snippet, url}]`; 422 на невалідні параметри або запит, 503, якщо ембединги не завантажені |
+| `GET /docs/{doc_id}` | повний текст документа; 404, якщо такого немає |
+| `GET /stats` | розмір індексу, словник, постинги, кількість фрагментів, uptime |
+| `GET /health` | 200 `{"status": "ok"}`; 503, поки індекс вантажиться або якщо не завантажився |
+| `GET /docs` | інтерактивна OpenAPI-документація |
+
+Конфігурація — лише змінні оточення: `INDEX_PATH`, `SEMANTIC_PATH`, `LOG_LEVEL`, `LOG_FORMAT=text|json`, `PORT`, `WEB_CONCURRENCY` (див. `.env.example`).
+
+## Деплой
+
+`render.yaml` описує сервіс для Render: **New → Blueprint →** цей репозиторій. Render збирає `Dockerfile`, перевіряє `/health`, логи (JSON з `request_id`) видно в панелі **Logs**. Безкоштовний екземпляр має 512 МБ — процесу потрібно ~310 МіБ, тому один воркер. Після першого деплою вписати адресу в перший рядок цього README і заповнити рядок «розгорнутий» у таблиці навантаження (`oha -z 30s -c 20 "https://<адреса>/search?q=python+type+annotations&k=10"`).
+
+## Виміри: Lab 1–8 в одному місці
+
+Корпус Lab 1–5 — синтетичний (300 документів з `benchmarks/make_demo_corpus.py`), Lab 6 — локальне дзеркало, Lab 7–8 — 744 PEP. Повні звіти з поясненнями — у [`docs/LABS.md`](docs/LABS.md).
+
+### Lab 1 — потокова обробка
+
+Окремі числа lazy/eager і `tracemalloc` у вихідному звіті Lab 1 не збереглися, тому тут їх немає.
+
+### Lab 2 — індекс, серіалізація, пам'ять (синтетичний корпус)
+
+| Терм | Група | Двигун | Результатів | Середній час (мс) |
+|---|---|---|---:|---:|
+| токен | common | merge | 300 | 0.0048 |
+| токен | common | set | 300 | 0.0048 |
+| raretoken0001 | rare | merge | 1 | 0.0010 |
+| raretoken0001 | rare | set | 1 | 0.0010 |
 
 | Формат | Розмір (MiB) | Save (с) | Load (с) |
 |---|---:|---:|---:|
 | pickle | 0.26 | 0.020832 | 0.018150 |
 | JSON | 0.41 | 0.033599 | 0.013174 |
 
-#### Пам'ять
+| Варіант | Пікова пам'ять (MiB) | Розмір pickle (MiB) | Load (с) |
+|---|---:|---:|---:|
+| plain | 2.39 | 0.31 | 0.006774 |
+| slots | 1.72 | 0.24 | 0.015783 |
+| array | 0.90 | 0.15 | 0.000246 |
 
-| Варіант | Документи | Пікова пам'ять (MiB) | Розмір pickle (MiB) | Save (с) | Load (с) |
-|---|---:|---:|---:|---:|---:|
-| plain | 300 | 2.39 | 0.31 | 0.010769 | 0.006774 |
-| slots | 300 | 1.72 | 0.24 | 0.018702 | 0.015783 |
-| array | 300 | 0.90 | 0.15 | 0.001073 | 0.000246 |
-
-`slots=True` прибирає окремий `__dict__` екземпляра, а `array('I')` зберігає числові значення щільніше, без окремого Python-об'єкта для кожного числа.
-
-## Лабораторна робота №3
-
-**Тема:** рейтинг і модель об'єктів — dunder-методи, протоколи, декоратори.
-
-Лабораторна продовжує корпус і індекс з перших двох робіт. Вимоги: `Index` як Python-подібний об'єкт, `Scorer` з TF-IDF/BM25, дерево Boolean-запитів, контекстний менеджер, `@timed`, `lru_cache`, сніпети та P@5. Джерело: [методичка Lab 3](https://github.com/rmalkevy/Programming-Practice-Projects/blob/main/courses/python/lab-03-the-object-model-and-ranking.md).
-
-### 1. Об'єкт `Index`
-
-Підтримуються:
-
-```python
-len(index)
-"python" in index
-index["python"]
-for term in index:
-    ...
-repr(index)
-index.num_docs
-index.avg_doc_length
-index.doc_length(doc_id)
-index.df(term)
-```
-
-`Index` реалізує `collections.abc.Mapping`. `avg_doc_length` є `cached_property`. `open_index(path)` завжди викликає `close()` у `finally`, включно з випадками, коли тіло `with` завершується винятком.
-
-### 2. TF-IDF та BM25
-
-Є протокол `Scorer` і дві взаємозамінні реалізації:
-
-```python
-TfIdf()
-BM25(k1=1.5, b=0.75)
-```
-
-Для top-k використовується `heapq.nlargest`, а результат має форму `SearchResult(doc_id, score, title, snippet)` з `order=True`.
-
-### 3. Санітарні перевірки рейтингу
-
-Команда:
-
-```powershell
-uv run python benchmarks/sanity_lab3.py
-```
-
-Перевіряє три властивості:
-
-1. рідкісний терм має більшу TF-IDF вагу, ніж частий;
-2. 20-та повторна поява слова в BM25 дає малий додатковий приріст;
-3. за однакового `tf` короткий документ має вищий BM25 бал, ніж дуже довгий.
-
-### 4. Мова запитів
-
-Парсер підтримує:
-
-```text
-python AND (async OR await) NOT java "event loop"
-```
-
-Вузли дерева: `Term`, `Phrase`, `And`, `Or`, `Not`. Підтримані `&`, `|`, `~`, неявний `AND`, `OR`, `NOT`, дужки та фрази.
-
-Фразові запити використовують позиції токенів. Індекс треба будувати з `--positions`:
-
-```powershell
-uv run python -m findex.index data/ --out index.bin --positions
-```
-
-### 5. Decorator та cache
-
-`@timed` з `functools.wraps` використовується для `build`, `load`, `search`. Шлях `query -> result ids` кешується через `@lru_cache(maxsize=256)`.
-
-При повторному запиті у CLI видно `cache info` з `hits`:
-
-```powershell
-uv run python -m findex.search index.bin "python search" -k 5
-```
-
-### 6. Сніпети
-
-Для результату формується вікно приблизно ±80 символів навколо першого найкращого входження, а терми підсвічуються через `**...**`.
-
-### 7. Precision@5
-
-Для детермінованого корпусу Lab 1/2 використані 10 ручних міток. Для common-термів релевантними вважаються всі документи, для `raretoken0001...0005` — відповідні документи `doc-0001...doc-0005`. Скрипт:
-
-```powershell
-uv run python benchmarks/evaluate_lab3.py data/benchmark --limit 300
-```
-
-Результат виводиться як таблиця для README. Precision@5 рахується як кількість релевантних документів у top-5, поділена на 5.
+### Lab 3 — Precision@5 (синтетичний корпус)
 
 | Запит | TF-IDF P@5 | BM25 P@5 |
 |---|---:|---:|
-| python | 1.00 | 1.00 |
-| search | 1.00 | 1.00 |
-| generators | 1.00 | 1.00 |
-| tokenizes | 1.00 | 1.00 |
-| unicode | 1.00 | 1.00 |
-| raretoken0001 | 0.20 | 0.20 |
-| raretoken0002 | 0.20 | 0.20 |
-| raretoken0003 | 0.20 | 0.20 |
-| raretoken0004 | 0.20 | 0.20 |
-| raretoken0005 | 0.20 | 0.20 |
-
-Після запуску значення з власної машини треба вставити сюди.
+| python, search, generators, tokenizes, unicode | 1.00 | 1.00 |
+| raretoken0001 … raretoken0005 (1 релевантний документ) | 0.20 | 0.20 |
 
-### Reflection — Lab 3
-
-1. Що викликають `len(index)`, `term in index` та `index[term]`?
-2. Чим `typing.Protocol` відрізняється від ABC?
-3. Навіщо `functools.wraps` у `@timed`?
-4. Як структурно відрізняється декоратор із параметрами?
-5. Що відбувається до і після `yield` у `@contextmanager`?
-6. Що контролюють `k1` і `b` у BM25?
-7. Чому `heapq.nlargest(k, ...)`, а не `sorted(...)[:k]`?
-8. Чому `a OR b c` парситься як `Or(a, And(b, c))`?
+### Lab 4 — якість коду
 
-## Лабораторна робота №4
+`findex 0.4.0`: Ruff, Ruff format, Pyright strict і pytest у CI; покриття тоді 58 %, у v1.0.0 — **79 %**, 167 тестів.
 
-**Тема:** типізація, тестування, пакування та CLI.
+### Lab 5 — паралельна індексація (300 документів)
 
-### Реалізовано
+| Executor | Workers | Wall (s) | Speedup |
+|---|---:|---:|---:|
+| serial | 1 | 0.9874 | 1.00× |
+| threads | 4 | 0.9940 | 0.99× |
+| threads | 20 | 0.9183 | 1.08× |
+| processes | 2 | 0.8585 | 1.15× |
+| processes | 4 | 0.6720 | 1.47× |
+| processes | 20 | 0.9874 | 1.00× |
 
-- строгі типи для публічного API та `Scorer` через `typing.Protocol`;
-- `Iterator` / `Iterable` для потокового API;
-- `Literal` для `engine`, `scorer` та форматів;
-- `pytest` із фікстурою `tests/conftest.py` та параметризованими тестами;
-- property-based тести через Hypothesis;
-- покриття через `pytest-cov`;
-- `pyproject.toml` з PEP 621 метаданими, dev-залежностями та `[project.scripts]`;
-- команда `findex` з підкомандами `index`, `search`, `stats`;
-- Rich progress bar для побудови індексу та Rich table для пошуку;
-- `findex search --json` для JSON Lines у `stdout`;
-- `-v` і `-vv` для рівня логування;
-- діагностика через `logging` у `stderr`;
-- GitHub Actions: Ruff, Ruff format, Pyright strict, pytest + coverage;
-- SonarQube Cloud із coverage report.
+| GIL-експеримент | CPython 3.13 | 3.13t (free-threaded) |
+|---|---:|---:|
+| один CPU-bound виклик | 0.4273 s | 0.4599 s |
+| два послідовно | 0.8637 s | 0.9424 s |
+| два потоки | 0.8886 s | 0.4603 s |
+| два процеси | 0.5312 s | 0.5632 s |
 
-### Фактичні результати Lab 4
+### Lab 6 — асинхронний краулер (200 сторінок, локальне дзеркало)
 
-- версія пакета: `findex 0.4.0`;
-- зібрано wheel та source distribution командою `uv build`;
-- CLI має підкоманди `index`, `search`, `stats`;
-- у контрольному прогоні coverage Lab 4 зафіксовано `58%`;
-- CI запускає Ruff, Ruff format, Pyright strict та pytest + coverage;
-- SonarQube Cloud використовується для перевірки Quality Gate.
+| Concurrency | Wall (s, median) | Pages/s |
+|---:|---:|---:|
+| 1 | 4.218 | 47.42 |
+| 5 | 2.182 | 91.67 |
+| 20 | 2.078 | 96.25 |
 
-### Запуск як встановленого інструмента
+### Lab 7 — веб-сервіс (v0.7.0, 2 vCPU)
 
-```powershell
-uv sync
-uv run findex --help
-```
+20 одночасних `/search`, 1 воркер — чи блокується цикл подій:
 
-Побудова індексу:
+| Маршрут | Усі 20 (мс) | `/health` max під навантаженням (мс) | Відповідей `/health` за серію |
+|---|---:|---:|---:|
+| `def` (пул потоків) | 472 | 141 | 9 |
+| `async def` (на циклі) | 372 | 348 | 4 |
 
-```powershell
-findex index data/ --out index.bin --positions
-```
+`oha -z 30s -c 50 "/search?q=python+type+annotations&k=10"`:
 
-Пошук:
+| Ціль | RPS | p50 (мс) | p95 (мс) | p99 (мс) |
+|---|---:|---:|---:|---:|
+| v0.7.0, 1 воркер, `async def` | 55.3 | 885 | 1 083 | 1 947 |
+| v0.7.0, 1 воркер, `def` | 43.5 | 1 144 | 1 526 | 2 269 |
+| v0.7.0, 4 воркери | 98.0 | 300 | 1 327 | 1 698 |
+| розгорнутий (Render free, `-c 20`) | _після деплою_ | | | |
 
-```powershell
-findex search index.bin "python AND (search OR token)" --scorer bm25 -k 5
-```
+### Lab 8 — після профілювання і NumPy (v1.0.0, той самий запит і машина)
 
-JSON Lines у stdout:
+| Ціль | RPS | p50 (мс) | p95 (мс) | p99 (мс) |
+|---|---:|---:|---:|---:|
+| 1 воркер, keyword | 189.9 | 261 | 351 | 403 |
+| 1 воркер, semantic | 166.5 | 297 | 381 | 530 |
+| 1 воркер, hybrid | 153.8 | 319 | 436 | 527 |
+| 4 воркери, keyword | 450.5 | 48 | 321 | 373 |
 
-```powershell
-findex search index.bin "python search" --json -k 5 > results.jsonl
-```
+Скорер на NumPy (лише ранжування, BM25, k=10; таблиці з TF-IDF — [`docs/lab08_numpy_scorer.md`](docs/lab08_numpy_scorer.md)):
 
-Статистика:
-
-```powershell
-findex stats index.bin
-```
-
-Рівні логування:
-
-```powershell
-findex -v search index.bin "python"
-findex -vv search index.bin "python"
-```
-
-### Перевірка типів і тестів
-
-```powershell
-uv run pyright
-uv run ruff check .
-uv run ruff format --check .
-uv run pytest --cov=findex --cov-report=term-missing
-```
-
-Тести, які зазвичай працюють довше секунди, треба запускати з маркером `slow` і за потреби виключати через `-m "not slow"`.
-
-### Пакування
-
-```powershell
-uv build
-```
-
-У каталозі `dist/` з'являться wheel та інші артефакти пакування. Перевірка ізольованого запуску:
-
-```powershell
-uvx --from dist\findex-0.4.0-py3-none-any.whl findex --help
-```
-
-Встановлення як CLI-інструмента:
-
-```powershell
-uv tool install .
-findex --help
-```
-
-### Покриття
-
-Фактичний відсоток покриття залежить від запуску тестового набору. Перед здачею потрібно виконати:
-
-```powershell
-uv run pytest --cov=findex --cov-report=term-missing
-```
-
-і перенести підсумковий відсоток у цей README. Свідомо поза повним покриттям можуть залишитися рідкісні гілки помилок I/O, захист від пошкоджених зовнішніх файлів та окремі compatibility-обгортки старих CLI `python -m ...`.
-
-### CI
-
-CI на GitHub Actions запускає `uv sync`, `ruff check`, `ruff format --check`, `pyright` у strict mode та `pytest` із coverage на кожен push і Pull Request.
-
-
-### Реліз v0.4.0
-
-Після успішного CI та перевірки пакування створюється Git-тег `v0.4.0`. Wheel формується командою `uv build` і прикріплюється до GitHub Release `v0.4.0`.
-
-Команди: 
-
-```powershell
-uv sync
-uv run pyright
-uv run ruff check .
-uv run ruff format --check .
-uv run pytest --cov=findex --cov-report=term-missing
-uv build
-uv tool install dist\findex-0.4.0-py3-none-any.whl
-findex --help
-```
-
-Після перевірки релізу: 
-
-```powershell
-git tag v0.4.0
-git push origin v0.4.0
-```
-
-У GitHub створіть Release `v0.4.0` і прикріпіть wheel з каталогу `dist/`.
-
-### Покриття Lab 4
-
-У контрольному прогоні на базових тестах Lab 1–3 отримано 58% покриття. Остаточне число для звіту потрібно отримати повним запуском Lab 4 після встановлення `hypothesis`, `pytest-cov` та нових CLI-тестів:
-
-```powershell
-uv run pytest --cov=findex --cov-report=term-missing
-```
-
-За межами цільового покриття залишаються переважно рідкісні гілки помилок I/O, пошкоджених зовнішніх файлів та старі compatibility-обгортки `python -m ...`; основний CLI, пошук, парсер, серіалізація і типізований API покриваються тестами.
-
-## Лабораторна робота №5
-
-**Тема:** конкурентність і GIL: потоки, процеси і паралельна індексація.
-
-### Реалізовано
-
-- винесено індексацію одного набору документів у module-level `build_partial()`;
-- додано `merge()` для детермінованого об'єднання partial-індексів;
-- `findex index` підтримує `--workers N` та `--executor {serial,threads,processes}`;
-- для `ProcessPoolExecutor` передаються шляхи до файлів, а не завантажені тексти;
-- для процесів використовується spawn-safe схема;
-- worker exceptions не приховуються та доходять до CLI з traceback;
-- serial, threads і processes дають байт-ідентичний pickle-індекс;
-- додано benchmark із wall time, CPU time, Peak RSS, merge time та speedup;
-- додано графік `docs/lab05_speedup.png`;
-- додано експеримент `benchmarks/gil_experiments.py` для GIL та race condition;
-- перевірено free-threaded Python 3.13 (`3.13t`);
-- default executor встановлено як `processes` після benchmark на використаній машині.
-
-### 1. CLI
-
-Довідка команди:
-
-```powershell
-uv run findex index --help
-```
-
-Поточні параметри:
-
-```text
---workers <int>                    default: 1
---executor <serial|threads|processes>
-                                   default: processes
-```
-
-Приклад явного serial-запуску:
-
-```powershell
-uv run findex index data/ --out index-serial.bin --workers 1 --executor serial
-```
-
-Паралельний запуск процесами:
-
-```powershell
-uv run findex index data/ --out index-processes.bin --workers 4 --executor processes
-```
-
-Потоковий запуск:
-
-```powershell
-uv run findex index data/ --out index-threads.bin --workers 4 --executor threads
-```
-
-### 2. Детермінованість індексу
-
-Для корпусу з 300 документів були створені три індекси:
-
-- serial, 1 worker;
-- processes, 4 workers;
-- CPython 3.13t, threads, 4 workers.
-
-SHA-256 усіх трьох файлів однаковий:
-
-```text
-456D206D6E6C4BC0DC131530A28B0CE309FCB2F9FE07C4B4EDDE20B331128FEF
-```
-
-Статистика також однакова:
-
-| Показник | Значення |
-|---|---:|
-| Документи | 300 |
-| Словник | 357 |
-| Середня довжина | 5521.00 |
-| Токени | 1,656,300 |
-
-Це підтверджує, що конкурентна побудова не змінює зміст інвертованого індексу.
-
-### 3. Benchmark
-
-Повний запуск:
-
-```powershell
-uv run python benchmarks/benchmark_parallel.py data/ --repeats 3
-```
-
-Параметри машини:
-
-| Параметр | Значення |
-|---|---|
-| OS | Windows 11 10.0.26100 |
-| CPU | Intel64 Family 6 Model 151 Stepping 2 |
-| Фізичні ядра | 12 |
-| Логічні CPU | 20 |
-| Python | 3.13.15 |
-| Варіант | CPython 3.13 (GIL) |
-| Корпус | `data/` |
-| Документів | 300 |
-| Повторів на комірку | 3 |
-
-#### Результати
-
-| Executor | Workers | Wall (s, median) | CPU (s) | Peak RSS (MiB) | Merge (s) | Speedup |
+| Запит | Документів | Lab 3 (мс) | NumPy (мс) | Прискорення | Корпус ×10: Lab 3 / NumPy (мс) | Прискорення ×10 |
 |---|---:|---:|---:|---:|---:|---:|
-| serial | 1 | 0.9874 | 0.9688 | 70.65 | 0.0017 | 1.00× |
-| threads | 1 | 0.9814 | 0.9531 | 71.80 | 0.0019 | 1.01× |
-| threads | 2 | 0.9703 | 0.9688 | 72.41 | 0.0017 | 1.02× |
-| threads | 4 | 0.9940 | 0.9844 | 72.69 | 0.0017 | 0.99× |
-| threads | 8 | 0.9661 | 0.9844 | 72.85 | 0.0018 | 1.02× |
-| threads | 20 | 0.9183 | 0.9375 | 74.22 | 0.0019 | 1.08× |
-| processes | 1 | 1.2687 | 1.6250 | 75.23 | 0.0016 | 0.78× |
-| processes | 2 | 0.8585 | 1.7656 | 75.68 | 0.0018 | 1.15× |
-| processes | 4 | 0.6720 | 2.6719 | 75.68 | 0.0017 | 1.47× |
-| processes | 8 | 0.6859 | 4.9844 | 75.70 | 0.0021 | 1.44× |
-| processes | 20 | 0.9874 | 16.2344 | 75.80 | 0.0036 | 1.00× |
+| частий терм `python` | 729 | 0.645 | 0.070 | 9.2× | 5.786 / 0.327 | 17.7× |
+| середній терм `generator` | 100 | 0.100 | 0.036 | 2.8× | 0.853 / 0.077 | 11.0× |
+| рідкісний терм (df=3) | 3 | 0.005 | 0.022 | **0.3×** | 0.039 / 0.033 | 1.2× |
+| 3 терми, AND | 68 | 0.242 | 0.079 | 3.1× | 2.070 / 0.242 | 8.6× |
+| 3 терми, OR | 744 | 1.214 | 0.111 | 10.9× | 11.926 / 0.486 | **24.5×** |
 
-У цьому запуску найменший wall time отримано для `processes / 4`: `0.6720 s`, speedup `1.47×` відносно serial. Подальше збільшення до 8 процесів не покращило результат, а 20 процесів повернули час до рівня serial через накладні витрати.
+Precision@5 на 15 запитах — [нижче](#3-семантичний-і-гібридний-пошук).
 
-Фракція послідовного merge:
+## Lab 8: швидше, потім розумніше
 
-```text
-0.17%
+### 1. Профіль до змін
+
+Повний звіт: [`docs/lab08_profiling.md`](docs/lab08_profiling.md), flame graphs: [`search`](docs/lab08_flame_search.svg), [`index`](docs/lab08_flame_index.svg). Три найдорожчі місця записані **до** правок (окремий коміт):
+
+| # | Місце | Python чи native | Гіпотеза | Результат |
+|---|---|---|---|---|
+| 1 | `pickle.load` 482 тис. `Posting` — 2.55 с з 2.85 с `findex search` | Scalene: native (виклик C-функції); cProfile: всередині — Python-`_dataclass_setstate` → `fields()` на кожен об'єкт | власний `__reduce__`; масиви NumPy | load 1.96 → 1.22 с; `.npz` без позицій — **0.03 с** |
+| 2 | сніпети: на кожен результат заново читається JSONL, `json.loads`, `casefold` — 72 % пошуку в процесі | native (json, casefold, I/O) | кеш тексту | 2.67 → 1.07 мс на пошук |
+| 3 | скоринг: виклик `BM25.__call__` на кожен постинг | Python | вирази над масивами `int32` | 9–25× на довгих списках, 0.3× на коротких |
+
+Повторний профіль веб-шляху знайшов четверте місце: пошук вікна для сніпета ковзав по **всіх** входженнях терма в Python і забирав ~21 мс на запит. Заміна на `str.find` по заздалегідь опущеному в нижній регістр тексту і перевірку інших термів лише в околі найрідкіснішого дала 3.6 мс; разом з NumPy це підняло keyword-режим під навантаженням із 57 до 190 запитів/с.
+
+### 2. NumPy-скорер
+
+`src/findex/arrays.py`: постинги всіх термів у двох плоских масивах `int32` (`doc_ids`, `tfs`) з `offsets` (формат CSR), `doc_len` — один `int32[N]`. BM25 для одного терма — кілька операцій над цілими масивами (`tf + k1·(1 − b + b·dl/avgdl)`, де `dl = doc_len[doc_ids]` через fancy indexing), top-k — `np.argpartition` за O(n) замість сортування. Порядок операцій такий самий, як у Lab 3, а логарифми беруться через `math.log` (не `np.log`), тому **бали збігаються біт-у-біт**: `tests/test_arrays.py` перевіряє і порядок, і самі числа на 8 запитах × 3 скорери × 4 значення k.
+
+**Чому прискорення різне.** На частому термі (729 постингів) Python робить 729 викликів методу з атрибутами й діленнями, а NumPy — кілька проходів у C по суцільній пам'яті: 9×. На корпусі ×10 списки вдесятеро довші, а фіксовані витрати NumPy ті самі — 18–25×. На рідкісному термі (3 постинги) NumPy **повільніший** (0.3×): створення масивів, маски й `argpartition` коштують ~20 мкс незалежно від розміру, а Python-цикл на 3 елементи — 5 мкс. Векторизація окупається, коли накладні витрати виклику розподіляються на багато елементів.
+
+`pytest-benchmark` для `search` і `build_index` іде в CI окремим кроком: таблиця потрапляє в summary кожного запуску, JSON — в артефакти; окремий тест падає, якщо NumPy-шлях перестане бути щонайменше вдвічі швидшим за Python-цикл.
+
+### 3. Семантичний і гібридний пошук
+
+- `findex embed` ділить кожен документ на фрагменти до 200 слів (абзаци пакуються разом, довгі ріжуться по словах), додає до фрагмента заголовок PEP і рахує ембединги. Матриця `E: float32[11 402, 256]` (11.1 МіБ) і карта `фрагмент → (doc, start, end)` зберігаються як `.npy`.
+- **Модель — WordLlama `l2_supercat`** (256 вимірів). Ваги (16 МБ) входять у сам wheel з PyPI, тож ембединги рахуються без мережі — у Docker-збірці, в CI і на безкоштовному Render (512 МБ). Це статична модель (ембединги токенів Llama 2 + усереднення): слабша за трансформер all-MiniLM-L6-v2, але в рази дешевша. MiniLM теж підтримується: `findex embed --model all-MiniLM-L6-v2` після `uv pip install sentence-transformers`.
+- `mode=semantic`: `sims = E @ q` — одне множення матриці на вектор дає косинус до всіх фрагментів (вектори нормалізовані, тож косинус дорівнює скалярному добутку); документ отримує бал свого найкращого фрагмента (`np.lexsort` за `(doc, −sim)` і перший фрагмент кожної групи).
+- `mode=hybrid`: `RRF(d) = Σ 1/(60 + rank_d)` по списку BM25 і семантичному списку (по 100 документів). Звичайний запит у гібриді шукає ключові слова через `OR`, бо інакше один відсутній терм обнулив би половину гібрида.
+- Режим є в CLI (`--mode`), в API (`mode=`) і на сторінці (перемикач «Words / Meaning / Both»).
+
+**Precision@5.** Запити Lab 3 були на синтетичному корпусі, де релевантні всі документи, тож для PEP складено 10 нових розмічених запитів і 5 перефразованих, де навмисно немає ключових слів теми. Мітки зафіксовано до запуску: для тематичних запитів релевантні всі PEP з відповідним полем `Topic:` (воно зберігається окремо від тексту і не індексується), для решти — явні списки номерів PEP у `benchmarks/evaluate_lab8.py`.
+
+| # | Запит | Тип | Релевантних | Keyword | Semantic | Hybrid |
+|---:|---|---|---:|---:|---:|---:|
+| 1 | type hints | ключові слова | 49 | 1.00 | 1.00 | 1.00 |
+| 2 | packaging metadata | ключові слова | 103 | 1.00 | 1.00 | 1.00 |
+| 3 | release schedule | ключові слова | 27 | 1.00 | 1.00 | 1.00 |
+| 4 | steering council | ключові слова | 26 | 1.00 | 1.00 | 1.00 |
+| 5 | structural pattern matching | ключові слова | 6 | 1.00 | 1.00 | 1.00 |
+| 6 | global interpreter lock | ключові слова | 5 | 0.40 | 0.80 | 0.40 |
+| 7 | async await coroutines | ключові слова | 6 | 0.60 | 0.60 | 0.60 |
+| 8 | assignment expressions | ключові слова | 3 | 0.40 | 0.60 | 0.40 |
+| 9 | string interpolation | ключові слова | 10 | 0.80 | 1.00 | 1.00 |
+| 10 | data classes | ключові слова | 2 | 0.20 | 0.40 | 0.40 |
+| 11 | describe which kinds of values a variable may hold | перефраз | 49 | 0.00 | 0.60 | 0.40 |
+| 12 | bundle a library so people can install it | перефраз | 103 | 0.60 | 0.60 | 0.60 |
+| 13 | branch on the shape of nested data and pull out parts | перефраз | 6 | 0.00 | 0.00 | 0.20 |
+| 14 | run python threads truly in parallel on several cores | перефраз | 5 | 0.00 | 0.40 | 0.20 |
+| 15 | who has the final say over changes to the language | перефраз | 26 | 0.40 | 0.00 | 0.40 |
+| | **середнє, 10 запитів ключовими словами** | | | **0.74** | **0.84** | **0.78** |
+| | **середнє, 5 перефразів** | | | **0.20** | **0.32** | **0.36** |
+| | **середнє, усі 15** | | | **0.56** | **0.67** | **0.64** |
+
+**Що видно з таблиці.** На запитах, де слова збігаються зі словником документів (1–5), усі три режими ідеальні: тут BM25 уже робить усе. На перефразах ключові слова майже безсилі — три з п'яти дають 0, бо в релевантних PEP немає слів на кшталт «kinds of values» чи «shape of nested data», а неявний `AND` вимагає всіх. Пошук за змістом піднімає перефрази з 0.20 до 0.32 і знаходить документи про типізацію та GIL без жодного спільного ключового слова. Але він не всесильний: запит 15 («who has the final say…») семантичний режим провалив повністю — модель зачепилась за окремі слова і підняла PEP про `final` і мораторій на зміни мови, — а ключові слова знайшли PEP про моделі керування. Гібрид не найкращий у жодному рядку окремо, зате не падає до нуля, коли хоча б один зі списків правий, і має найкраще середнє на перефразах (0.36). Обережно з висновками: 15 запитів і P@5 — грубий інструмент, різниця 0.20 — це один документ у топ-5. Слабке місце — сама модель: статичні ембединги усереднюють слова без порядку і контексту, тож трансформер (MiniLM) на перефразах мав би бути помітно кращим; це перше, що варто перевірити далі.
+
+### Відтворити
+
+```bash
+uv run python benchmarks/benchmark_numpy_scorer.py data/peps.bin [--replicate 10]
+uv run python benchmarks/benchmark_search_path.py data/peps.bin
+uv run python benchmarks/evaluate_lab8.py data/peps.bin data/peps.jsonl
+uv run pytest tests/test_benchmarks.py --benchmark-enable --benchmark-only
+bash benchmarks/load_test.sh data/peps.bin 30s 50        # потрібен oha
 ```
 
-Теоретична верхня межа за законом Амдала для цієї частки:
+## Обмеження
 
-```text
-≈ 585.56×
-```
+- **Корпус маленький.** 744 документи, усе в пам'яті. На 50 млн фрагментів першим зламається брутфорс `E @ q` (≈ 51 ГБ матриця) і pickle-індекс з позиціями; потрібні ANN-індекс (HNSW: FAISS або hnswlib) та індекс на диску (`np.memmap`, стиснені постинги).
+- **Модель ембедингів слабка.** WordLlama — статичні вектори слів без контексту; на перефразах P@5 лише 0.32. MiniLM підтримується, але на цьому корпусі не виміряний.
+- **Пошук за словами без стемінгу і стоп-слів:** `thread` не знаходить `threads`, а запит з `in` чи `the` фільтрує й за ними. Звичайний запит — неявний `AND`; слова `and`/`or`/`not` у будь-якому регістрі — оператори.
+- **Pickle-індекс** вантажиться ~1.2 с і небезпечний з недовірених джерел. `.npz` (0.03 с) поки не містить позицій для фраз, тому основним форматом лишається pickle.
+- **Один процес — один GIL:** один воркер упирається в ~190 запитів/с на цьому запиті; кожен додатковий воркер — ще одна копія індексу (~310 МіБ).
+- **Безкоштовний Render** засинає після 15 хв простою; перший запит після цього — 30–60 с.
+- Немає автентифікації, rate limiting і HTTP-кешування.
 
-Графік speedup:
+## Reflection — Lab 8
 
-![Lab 5 speedup](docs/lab05_speedup.png)
-
-### 4. GIL і потоки
-
-Експеримент на звичайному CPython 3.13.15:
-
-```powershell
-uv run python benchmarks/gil_experiments.py --n 10000000 --iterations 1000000
-```
-
-Результати:
-
-| Режим | Час |
-|---|---:|
-| one | 0.4273 s |
-| two serial | 0.8637 s |
-| two threads | 0.8886 s |
-| two processes | 0.5312 s |
-
-`sys._is_gil_enabled()` повернув `True`.
-
-Для CPU-bound чистого Python потоки у звичайному CPython не дали справжнього паралельного виконання bytecode, а два процеси дали менший wall time.
-
-### 5. Race condition
-
-Експеримент із `counter += 1`:
-
-```text
-race expected:      2000000
-race unsafe result: 1157000
-race locked result: 2000000
-```
-
-Отже, сам GIL не гарантує коректність користувацьких інваріантів. Спільний mutable state потрібно синхронізувати, наприклад через `threading.Lock`, або уникати спільного стану.
-
-### 6. Free-threaded Python 3.13
-
-Встановлено окремий free-threaded інтерпретатор:
-
-```powershell
-uv python install 3.13t
-```
-
-Перевірка:
-
-```powershell
-uv run --python 3.13t --no-dev python -c "import sys; print(sys.version); print('GIL enabled:', sys._is_gil_enabled())"
-```
-
-Результат:
-
-```text
-CPython 3.13.15+freethreaded
-GIL enabled: False
-```
-
-Через відсутність сумісного wheel для `kiwisolver==1.5.1` у dev-наборі на цьому середовищі free-threaded перевірки запускалися з `--no-dev`; сам GIL-експеримент і CLI індексації не потребують `matplotlib`.
-
-Експеримент на `3.13t`:
-
-```powershell
-uv run --python 3.13t --no-dev python benchmarks/gil_experiments.py --n 10000000 --iterations 1000000
-```
-
-| Режим | Час |
-|---|---:|
-| one | 0.4599 s |
-| two serial | 0.9424 s |
-| two threads | 0.4603 s |
-| two processes | 0.5632 s |
-
-`sys._is_gil_enabled()` повернув `False`. У цьому експерименті два CPU-bound потоки мали wall time `0.4603 s` проти `0.9424 s` для двох послідовних запусків.
-
-Race condition залишився:
-
-```text
-race expected:      2000000
-race unsafe result: 1202847
-race locked result: 2000000
-```
-
-Отже, free-threading не усуває необхідність синхронізації спільного змінюваного стану.
-
-### 7. Threaded indexing на 3.13t
-
-```powershell
-uv run --python 3.13t --no-dev findex index data/ --out index-threads-313t.bin --workers 4 --executor threads
-```
-
-Результат:
-
-```text
-документів: 300
-термів: 357
-```
-
-Статистика:
-
-```text
-середня довжина: 5521.00
-токени: 1,656,300
-```
-
-SHA-256 цього індексу збігся із serial та processes індексами, тому навіть free-threaded threaded build дає той самий детермінований результат.
-
-### 8. Перевірка Lab 5
-
-Фінальний локальний прогін:
-
-```powershell
-uv run ruff check .
-uv run ruff format --check .
-uv run pyright
-uv run pytest --basetemp .pytest_tmp -p no:cacheprovider
-```
-
-Результат:
-
-```text
-Ruff:    All checks passed!
-Format:  32 files already formatted
-Pyright: 0 errors, 0 warnings, 0 informations
-Pytest:  61 passed
-```
-
-### Посилання на методичку Lab 5
-
-- Lab 5: https://github.com/rmalkevy/Programming-Practice-Projects/blob/main/courses/python/lab-05-concurrency-and-the-gil.md
-- Теорія та досліди: https://github.com/rmalkevy/Programming-Practice-Projects/blob/main/courses/python/lab-05-concurrency-and-the-gil.notes.md
-
-### Reflection — Lab 5
-
-1. Чому CPU-bound `findex` не отримує повного прискорення від `ThreadPoolExecutor` у звичайному CPython?
-2. Навіщо для `ProcessPoolExecutor` передавати шляхи до файлів, а не тіла документів?
-3. Чому функції воркерів мають бути module-level і picklable?
-4. Чому `counter += 1` не є достатньо надійним для спільного mutable state?
-5. Що показав експеримент на `3.13t` без GIL?
-6. Чому для 20 процесів швидкодія погіршилась порівняно з 4 процесами?
-7. Що означає послідовний merge для закону Амдала?
-8. Які накладні витрати з'являються при використанні процесів?
-
-## Зауваження щодо pickle
-
-`pickle` зручний для швидкої серіалізації Python-об'єктів, але завантаження чужого або підмінного `.bin` є небезпечним: під час десеріалізації pickle може виконувати код через механізм відновлення об'єктів. Тому `pickle`-файл потрібно завантажувати лише з довіреного джерела. Для менш довіреного обміну використовується JSON.
-
-## Запуск
-
-У корені проєкту:
-
-```powershell
-uv sync
-uv run pytest
-uv run ruff check .
-```
-
-Створення demo-корпусу:
-
-```powershell
-uv run python benchmarks/make_demo_corpus.py data/benchmark --documents 300 --copies-per-document 80
-```
-
-Побудова індексу:
-
-```powershell
-uv run python -m findex.index data/benchmark --out index.bin --positions
-```
-
-Пошук:
-
-```powershell
-uv run python -m findex.search index.bin 'python AND (search OR token) NOT java "search engine"' -k 10
-```
-
-JSON:
-
-```powershell
-uv run python -m findex.index data/benchmark --out index.json --format json --positions
-uv run python -m findex.search index.json "python search" -k 10
-```
-
-Контекстний API:
-
-```python
-from findex.store import open_index
-from findex.ranking import BM25
-
-with open_index("index.bin") as index:
-    results = index.search("python search", scorer=BM25(), k=5)
-```
+1. **cProfile vs py-spy vs Scalene.** cProfile — детерміністичний: рахує кожен виклик Python-функції (точні `ncalls`), але сповільнює програму і не бачить рядків. py-spy — семплює стек ззовні процесу майже без накладних витрат, тому саме його підключають до живого продакшн-процесу (`py-spy dump/top --pid`). Scalene — семплює з розділенням часу на Python / native / system і пам'ять по рядках — показує, чи взагалі допоможе векторизація.
+2. **`a + b` для float.** CPython: опкод `BINARY_OP`, перевірка типів, пошук `float.__add__`, розпакування двох `PyFloat`, додавання, виділення нового об'єкта, лічильники посилань. NumPy для `A + B`: один виклик ufunc, C-цикл по суцільних буферах (з SIMD), без об'єкта на елемент. Звідти й 100×.
+3. **Broadcasting `(N, 1)` і `(1, M)`** дає `(N, M)`: розмірність 1 «розтягується» без копіювання входів, але результат — справжній масив N·M елементів (для float64 — 8·N·M байт).
+4. **`argpartition` vs `argsort` для top-k:** O(n) проти O(n log n); сортувати потрібно лише k відібраних.
+5. **40× на частому, 1.5× на рідкісному:** фіксовані витрати NumPy (~20 мкс) розподіляються на тисячі постингів у першому випадку і на кілька — у другому (у нас на df=3 узагалі 0.3×).
+6. **Ембединг** — вектор, у якому близькі за змістом тексти лежать поруч. Косинус не залежить від довжини вектора; після нормалізації до одиничної довжини він дорівнює скалярному добутку, тож усі близькості — одне `E @ q`.
+7. **Фрагменти, а не документи:** вектор 40-сторінкового PEP — усереднена «каша» з усіх тем. Бал найкращого фрагмента знаходить документ за однією релевантною частиною.
+8. **RRF** використовує лише позиції: `Σ 1/(60 + rank)`. Сирі бали BM25 (0…∞) і косинус (−1…1) мають різні шкали й розподіли — їхня сума залежала б від нормалізації, а ранги порівнювані завжди.
+9. **15 запитів:** ключові слова програли перефразам 11, 13, 14 (0.00); семантичний пошук програв запит 15 (0.00 проти 0.40). Гібрид не опускається до нуля, якщо хоч один список правий: його перевага — стабільність, а не максимум.
+10. **50 млн фрагментів:** спершу пам'ять і час `E @ q` (50 млн × 256 × 4 Б ≈ 51 ГБ, сотні мс на запит) — потрібні HNSW/IVF-PQ або векторна БД; далі pickle-індекс, який не вміщається в пам'ять, — сегменти на диску з `memmap`.
 
 ## Структура
 
 ```text
-findex/
-├── .github/workflows/sonar.yml
-├── benchmarks/
-│   ├── make_demo_corpus.py
-│   ├── benchmark_search.py
-│   ├── benchmark_storage.py
-│   ├── measure_lab2.py
-│   ├── sanity_lab3.py
-│   ├── evaluate_lab3.py
-│   ├── benchmark_parallel.py
-│   └── gil_experiments.py
-├── data/
-├── src/findex/
-│   ├── corpus.py
-│   ├── tokenize.py
-│   ├── stats.py
-│   ├── benchmark.py
-│   ├── index.py
-│   ├── search.py
-│   ├── store.py
-│   ├── ranking.py
-│   ├── query.py
-│   ├── snippets.py
-│   ├── timing.py
-│   └── parallel.py
-├── tests/
-├── pyproject.toml
-├── sonar-project.properties
-├── uv.lock
-└── README.md
+src/findex/
+  corpus.py tokenize.py            Lab 1   потокове читання, токенізація
+  index.py store.py search.py      Lab 2-3 індекс, серіалізація, Boolean + ранжований пошук
+  query.py ranking.py snippets.py  Lab 3   AST запиту, BM25/TF-IDF, сніпети
+  cli.py                           Lab 4   findex index|search|stats|crawl|serve|embed
+  parallel.py                      Lab 5   serial / threads / processes
+  crawler/                         Lab 6   asyncio-краулер
+  web/                             Lab 7   FastAPI, Pydantic, шаблони, статика
+  arrays.py semantic.py            Lab 8   NumPy-скорер, ембединги, RRF
+benchmarks/                        усі виміри зі звітів
+corpus/peps.jsonl.gz               знімок корпусу PEP (public domain / CC0)
+docs/                              flame graphs, звіти, GIF, журнал Lab 1-7
+tests/                             167 тестів, включно з pytest-benchmark
+Dockerfile render.yaml             образ і деплой
 ```
 
 ## Git workflow
 
-Лабораторні розділяються окремими гілками та Pull Request у тому самому публічному репозиторії:
-
-```text
-main
- ├── tag lab-01
- ├── lab-02 → PR → main → tag lab-02
- ├── lab-03 → PR → main → tag lab-03
- ├── lab-04 → PR → main → tag lab-04
- └── lab-05 → PR → main → tag lab-05
-```
-
-Корпус у `data/` не комітиться.
+Кожна лабораторна — окрема гілка і Pull Request у `main`, тег на результаті: `lab-01` … `lab-08`, релізи `v0.4.0` і `v1.0.0` (Lab 7 — версія `0.7.0`).
 
 ## Посилання на методички
 
-- Lab 3: https://github.com/rmalkevy/Programming-Practice-Projects/blob/main/courses/python/lab-03-the-object-model-and-ranking.md
-- Теорія та досліди Lab 3: https://github.com/rmalkevy/Programming-Practice-Projects/blob/main/courses/python/lab-03-the-object-model-and-ranking.notes.md
-- Lab 5: https://github.com/rmalkevy/Programming-Practice-Projects/blob/main/courses/python/lab-05-concurrency-and-the-gil.md
-- Теорія та досліди Lab 5: https://github.com/rmalkevy/Programming-Practice-Projects/blob/main/courses/python/lab-05-concurrency-and-the-gil.notes.md
-
-## Примітка щодо числових результатів
-
-У README залишені лише результати, які були зафіксовані в матеріалах роботи та фактичних запусках проєкту. Для Lab 1 у вихідному README є опис реалізованих можливостей, але окремі числові значення lazy/eager та `tracemalloc` не збережені, тому вони не вигадуються.
-
-## Лабораторна робота №6
-
-**Тема:** асинхронний краулер — `asyncio`, HTTP-запити, `TaskGroup`, черги, семафори та потоковий JSONL.
-
-### Реалізовано
-
-- `findex crawl` — асинхронний генератор сторінок на основі `asyncio.Queue` і `asyncio.TaskGroup`;
-- один глобальний семафор, окремі семафори на origin і мінімальний інтервал між запитами до того самого origin;
-- HTTP-клієнт `httpx.AsyncClient`, `asyncio.timeout`, обмежені повтори для `429`, `5xx` і таймаутів, exponential backoff, jitter та `Retry-After`;
-- ручна обробка редиректів із блокуванням циклів і переходів за межі allowlist;
-- `RobotsCache` — кеш robots policy для кожного origin; недоступний/помилковий `robots.txt` блокує краул, `404/410` означає, що правил немає;
-- canonicalization URL: lower-case схема/host, прибрані fragment і trailing slash, відсортовані query-параметри;
-- `seen` для запобігання дублям і верхня межа `--max-pages`;
-- витягування title, тексту й посилань через стандартний `html.parser`;
-- JSONL записується рядок за рядком; серіалізація/запис виводяться в `asyncio.to_thread`, а індексація залишається окремою командою;
-- `Rich` live counters: сторінки, pages/s, запити in-flight, помилки й глибина черги;
-- `crawl.log` містить статус, кількість байтів, час запиту та номер спроби;
-- тести для HTTP виконуються через `httpx.MockTransport`, без живої мережі.
-
-### Дозвіл на краул і User-Agent
-
-Для перевірки та benchmark використовується **локальне дзеркало, створене `benchmarks/local_mirror.py` і прив'язане лише до `127.0.0.1`**. Воно знаходиться під контролем автора проєкту; його `robots.txt` дозволяє обхід. Зовнішній сайт для benchmark не використовується. User-Agent вказує репозиторій та контакт, переданий через обов'язковий `--contact`. Якщо запускаєте краулер на будь-якому публічному сайті, робіть це лише з дозволом, перевірте його robots.txt і вкажіть власний реальний email.
-
-### Запуск краулера
-
-У першому PowerShell вікні запустіть локальне дзеркало щонайменше на 250 сторінок:
-
-```powershell
-uv run python benchmarks/local_mirror.py --pages 250 --delay 0.01
-```
-
-Дзеркало навмисно має невелику затримку відповіді, щоб було видно різницю між конкурентністю 1, 5 і 20. Воно слухає лише loopback-інтерфейс.
-
-У другому вікні:
-
-```powershell
-uv run findex crawl http://127.0.0.1:8765/page/0 --contact YOUR_REAL_EMAIL@example.com --max-pages 200 --concurrency 20 --per-host 20 --per-host-delay 0 --out data/crawl.jsonl --log-file crawl.log
-```
-
-Замініть `YOUR_REAL_EMAIL@example.com` на свою справжню контактну адресу. Для звичайного краулу defaults залишаються обережнішими: `--per-host 2` та `--per-host-delay 0.2`. У benchmark локального дзеркала per-host limit навмисно послаблюється, бо цей сервер належить автору проєкту.
-
-Після завершення краулу індекс будується **поза event loop**. JSONL обробляється по одному рядку як по одному документу:
-
-```powershell
-uv run findex index data/crawl.jsonl --out index-crawl.bin --workers 4 --executor processes
-uv run findex search index-crawl.bin "asyncio" -k 5
-```
-
-### Benchmark: concurrency 1 / 5 / 20
-
-Залиште локальне дзеркало запущеним. Команда використовує той самий seed, той самий `max_pages=200`, три повтори й ті самі per-host параметри для всіх варіантів:
-
-```powershell
-uv run python benchmarks/benchmark_crawl.py --contact YOUR_REAL_EMAIL@example.com --max-pages 200 --repeats 3 --per-host 20 --per-host-delay 0
-```
-
-Скрипт вимірює wall time, сторінки за секунду, помилки з URL-логів і Peak RSS. Markdown-таблиця також записується до `data/lab06-benchmark/table.md`; після запуску перенесіть **реальні рядки з вашої машини** в таблицю нижче.
-
-| Concurrency | Pages (median) | Wall (s, median) | Pages/s | Errors (median) | Peak RSS (MiB, median) |
-|---:|---:|---:|---:|---:|---:|
-| 1 | 200 | 4.218 | 47.42 | — | 5.43 MiB |
-| 5 | 200 | 2.182 | 91.67 | — | 5.43 MiB |
-| 20 | 200 | 2.078 | 96.25 | — | 5.43 MiB |
-
-Не підставляйте в цю таблицю числа з іншого комп'ютера — результати залежать від затримки дзеркала, Python, ОС і навантаження машини.
-
-### Інтерпретація
-
-Краулер майже весь час очікує мережеву відповідь. `asyncio` дає одному потоку перемикатися на інші задачі в `await`, поки сокет чекає відповіді. Це відрізняється від Lab 5: індексація CPU-bound, тому там процеси допомагають виконувати Python-код паралельно; у краулері процеси не потрібні для перекриття мережевих очікувань.
-
-Обмеження на host зменшує максимальну швидкість, особливо коли сторінки беруться з одного домену. Воно залишається заради ввічливого навантаження на сервер і дотримання robots policy. Значення `--per-host 20 --per-host-delay 0` використовуються **тільки** для локального дзеркала в контрольованому benchmark, а не як рекомендовані налаштування для публічних сайтів.
-
-Якби токенізація та індексація запускалися всередині корутини синхронним CPU-кодом, event loop не міг би перемикатися на інші запити до завершення цієї роботи. Тому краулер витягує текст, пише JSONL потоково, а `findex index` запускається окремо після завершення мережевого обходу.
-
-### Приклад обробленого збою: HTTP 429
-
-Локальне дзеркало має endpoint `/flaky429`: він повертає один `429` з `Retry-After: 0`, а наступний запит успішний. Для відтворення виконайте:
-
-```powershell
-uv run findex crawl http://127.0.0.1:8765/flaky429 --contact YOUR_REAL_EMAIL@example.com --max-pages 2 --concurrency 2 --per-host 2 --per-host-delay 0 --out data/failure-example.jsonl --log-file docs/lab06_failure.log
-```
-
-Приклад фактичних рядків з локального тестового запуску (час і `elapsed` у вашому запуску відрізнятимуться):
-
-```text
-INFO url=http://127.0.0.1:8765/flaky429 status=429 bytes=0 elapsed=0.004s attempt=1
-WARNING url=http://127.0.0.1:8765/flaky429 status=429 action=retry delay=0.000s attempt=1/3
-INFO url=http://127.0.0.1:8765/flaky429 status=200 bytes=105 elapsed=0.004s attempt=2
-```
-
-Тобто `429` не завершив увесь краул: клієнт виконав одну повторну спробу згідно з `Retry-After`, записав фінальну успішну сторінку, а лог залишив обидва статуси.
-
-### Перевірки Lab 6
-
-```powershell
-uv run ruff check .
-uv run ruff format --check .
-uv run pyright
-uv run pytest --basetemp .pytest_tmp -p no:cacheprovider
-```
-
-Методичка: [Lab 6 — Asyncio crawler](https://github.com/rmalkevy/Programming-Practice-Projects/blob/main/courses/python/lab-06-asyncio-crawler.md) · [Нотатки](https://github.com/rmalkevy/Programming-Practice-Projects/blob/main/courses/python/lab-06-asyncio-crawler.notes.md)
-
-### Reflection — Lab 6
-
-1. Що відбувається в event loop, коли корутина доходить до `await` на читанні сокета?
-2. Чому `time.sleep()` блокує інші задачі, а `asyncio.sleep()` — ні?
-3. Чому `TaskGroup` краще пасує до керованих worker-задач, ніж fire-and-forget?
-4. Чому треба одночасно обмежувати глобальну конкурентність і кількість запитів до одного host?
-5. Як `Retry-After` змінює звичайний exponential backoff?
-6. Чому `counter += 1` і спільний змінюваний стан вимагають синхронізації, навіть якщо програма асинхронна?
-7. Чому індексація має виконуватися після краулу, а не всередині корутини?
-
-## Лабораторна робота №7
-
-**Тема:** пошук у вебі — ASGI, FastAPI, Pydantic, `Depends` і `lifespan`, `def` vs `async def`, конфіг з оточення, Docker, деплой, навантажувальне тестування.
-
-### Корпус для демо
-
-Синтетичний корпус з Lab 1 (300 однакових документів) не годиться для сторінки, яку показують чужій людині, тому для веб-версії взято реальний текст: **744 Python Enhancement Proposals** з репозиторію [python/peps](https://github.com/python/peps) (public domain / CC0). Скрипт `benchmarks/make_pep_corpus.py` перетворює `.rst` на JSONL того самого формату, що пише краулер з Lab 6 (`url`, `title`, `text`), тож індексується звичайним `findex index`. Знімок корпусу лежить у `corpus/peps.jsonl.gz` (4 МБ), щоб збірка Docker не залежала від мережі.
-
-| Корпус | Документів | Словник | Постингів | Середня довжина | Індекс (pickle, з позиціями) |
-|---|---:|---:|---:|---:|---:|
-| PEPs @ `6068058` | 744 | 31 753 | 481 435 | 2 722.67 токена | 14.6 МБ |
-
-### Реалізовано
-
-- `src/findex/web/` — FastAPI-застосунок:
-  - `settings.py` — `Settings(BaseSettings)`: `INDEX_PATH`, `LOG_LEVEL`, `LOG_FORMAT`, `SEARCH_ROUTE`; читається з оточення або `.env`, у коді немає шляхів;
-  - `state.py` — `lifespan` один раз на процес завантажує індекс у потоці (`asyncio.to_thread`), поки сервер уже відповідає; залежності `get_state` → `get_loaded_index` → `get_index` (503, поки індекс не готовий);
-  - `models.py` — Pydantic-моделі **лише на межі**: `SearchResponse`, `SearchHit`, `DocumentResponse`, `StatsResponse`, `HealthResponse`, `ErrorResponse`;
-  - `service.py` — перетворення: всередині працюють dataclass-и з Lab 2–3 (`Posting`, `DocMeta`, `SearchResult`), назовні — Pydantic;
-  - `app.py` — маршрути, middleware з `X-Request-ID`, access-log і чистою відповіддю 500;
-  - `logs.py` — логи в stdout, текстові або JSON (`LOG_FORMAT=json`), з `request_id` у кожному рядку;
-  - `templates/` + `static/` — сторінка пошуку на Jinja2 + htmx.
-- `findex serve [--index PATH] [--port 8000] [--workers N]` — обгортка над uvicorn (`PORT` і `WEB_CONCURRENCY` теж читаються з оточення).
-- `Dockerfile` (два етапи, `uv.lock`, non-root), `.dockerignore`, `render.yaml`.
-
-### API
-
-| Маршрут | Що повертає | Коди |
-|---|---|---|
-| `GET /search?q=&k=&scorer=&page=` | `SearchResponse{query, scorer, page, k, total, pages, took_ms, results[]}` | 200, 422 (валідація або нерозбірний запит), 503 |
-| `GET /docs/{doc_id}` | повний текст і метадані документа | 200, 404, 422 |
-| `GET /stats` | документи, словник, постинги, розмір файлу, час завантаження, uptime | 200, 503 |
-| `GET /health` | `{"status": "ok"}` / `loading` / `error` | 200, 503 |
-| `GET /docs` | OpenAPI (Swagger UI), згенерований FastAPI | 200 |
-
-Обмеження параметрів задані типами: `q: str` 1–200 символів, `k: int` 1–50, `page: int` 1–100, `scorer: Literal["bm25", "tfidf"]`. Невідомий `scorer` чи `k=abc` → 422 з тілом `{"detail": [...]}` від Pydantic; синтаксична помилка в запиті (`(python`) → 422 `{"detail": "Invalid query: ..."}`.
-
-Пагінація: `top_k` тримає купу з `page·k` елементів (O(n log(page·k))), сніпети будуються лише для сторінки, що повертається.
-
-Неочікуваний виняток: у лог іде повний стек з `request_id`, клієнт отримує тільки
-`{"detail": "Internal Server Error", "request_id": "..."}` — той самий id, що в заголовку `X-Request-ID`, за ним рядок легко знайти в логах платформи.
-
-```text
-2026-10-17 14:30:09,843 INFO [a4bc213da7924a3c] findex.web: GET /doc/390 -> 200 4.8 ms
-```
-
-### Сторінка пошуку
-
-`GET /` — поле запиту, перемикач BM25/TF-IDF, результати з підсвіткою (`<mark>`), бали, посилання на оригінал на peps.python.org, перехід між сторінками. `GET /doc/{id}?q=...` — перегляд документа з підсвіченими термами запиту. htmx оновлює лише блок результатів під час набору (`/ui/results`, затримка 300 мс), а адресний рядок лишається на звичайному `/?q=...` (заголовок `HX-Push-Url`), тож посиланням можна поділитися. Без JavaScript форма працює звичайним GET.
-
-Сніпет: вікно ±120 символів ставиться там, де поруч зустрічається найбільше **різних** термів запиту (ковзне вікно по входженнях, O(кількість входжень)), а не на першому входженні будь-якого терма. Весь текст екранується Jinja2, `<mark>` додається лише навколо збігів — тест перевіряє, що `<script>` у запиті не виконується.
-
-### Тести
-
-`tests/test_web.py` — 34 тести через `TestClient` і `app.dependency_overrides[get_index]`, без справжнього файлу індексу (крім двох тестів самого `lifespan`, які зберігають крихітний індекс у `tmp_path`):
-
-- успішний пошук, TF-IDF + Boolean-запит, пагінація, порожній результат;
-- 422 для кожного невалідного параметра і для нерозбірного запиту;
-- `/docs/{id}`: 200, 404, 422 для нечислового id;
-- `/health` → 503, коли індекс не завантажений; 503 з `status=error`, коли файлу немає; `/search` і `/stats` → 503;
-- чистий 500 без стека і з `request_id` у лозі;
-- варіанти `def` і `async def` повертають однакові результати;
-- сторінка: підсвітка, екранування, повідомлення про помилку запиту, htmx-фрагмент, перегляд документа, CSS;
-- `findex serve` викликає `uvicorn.run` з правильними параметрами.
-
-### `def` чи `async def`: 20 одночасних запитів
-
-`benchmarks/web_concurrency.py` піднімає справжній uvicorn (1 воркер) з `SEARCH_ROUTE=def` і `SEARCH_ROUTE=async`, шле 20 одночасних `GET /search?q=python type annotations` і паралельно весь час пінгує `/health`. Медіана з 5 серій, 2 vCPU, Python 3.13:
-
-| Маршрут | Усі 20 (мс) | Найшвидший пошук (мс) | p50 пошуку (мс) | Найповільніший (мс) | `/health` p50 під навантаженням (мс) | `/health` max (мс) | Відповідей `/health` за серію |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| `def` (пул потоків) | 472 | 56 | 435 | 480 | 38.2 | 141 | 9 |
-| `async def` (на event loop) | 372 | 24 | 352 | 384 | 5.6 | 348 | 4 |
-
-Сам пошук (~18 мс CPU на запит) у `async def` навіть трохи швидший: запити йдуть строго по черзі, без перемикання потоків і боротьби за GIL. Але поки триває серія, цикл подій зайнятий: `/health` чекав до 348 мс, тобто всю серію, і за серію встиг відповісти лише 4 рази. З `def` FastAPI віддає роботу в пул потоків, цикл вільний, і `/health` відповідає не пізніше ніж за 141 мс навіть під час серії. Платформа, яка перевіряє `/health` з таймаутом, з `async def` вважала б сервіс мертвим під навантаженням. **У коді лишається `def`**; `SEARCH_ROUTE=async` залишено лише як перемикач для цього досліду.
-
-### Docker
-
-```bash
-docker build -t findex .
-docker run --rm -p 8000:8000 findex                       # індекс уже всередині образу
-docker run --rm -p 8000:8000 -e INDEX_PATH=/data/peps.bin -v "$PWD/data:/data:ro" findex
-```
-
-- етап `builder` (`ghcr.io/astral-sh/uv:python3.13-bookworm-slim`): спершу `uv sync --locked --no-install-project` лише за `uv.lock` (кешований шар), потім сам проєкт як звичайний пакет (`--no-editable`), потім `findex index` будує індекс з `corpus/peps.jsonl.gz`;
-- етап `runtime` (`python:3.13-slim-bookworm`): лише `.venv` і `data/`, користувач `findex` (uid 10001), `HEALTHCHECK` на `/health`, `CMD ["findex", "serve", "--host", "0.0.0.0"]`;
-- образ перевірено локально: `id` у контейнері → `uid=10001(findex)`, `docker inspect` → `healthy`, пам'ять процесу ~250 МіБ (вміщається в безкоштовні 512 МБ Render).
-
-### Деплой (Render)
-
-1. <https://dashboard.render.com> → **New → Blueprint** → підключити цей репозиторій. Render прочитає `render.yaml`: Docker-сервіс, `healthCheckPath: /health`, змінні `LOG_FORMAT=json`, `LOG_LEVEL=INFO`, `WEB_CONCURRENCY=1`; `PORT` Render задає сам.
-2. Після першого деплою адреса має вигляд `https://findex-xxxx.onrender.com` — вписати її в перший рядок цього README.
-3. Логи (JSON, по рядку на запит з `request_id`) видно в **Logs** сервісу. Поки індекс вантажиться, `/health` віддає 503, і Render не перемикає трафік на новий екземпляр; якщо файл індексу пошкоджений, деплой не стане «live».
-4. Безкоштовний екземпляр засинає після 15 хв без запитів; перший запит після цього чекає ~30–60 с.
-
-### Навантаження: `oha`
-
-`bash benchmarks/load_test.sh data/peps.bin 30s 50` — 30 с, 50 клієнтів, `GET /search?q=python+type+annotations&k=10`, сирі JSON-звіти в `docs/lab07_oha/`. Машина: 2 vCPU.
-
-| Ціль | Маршрут | Конкурентність | RPS | p50 (мс) | p95 (мс) | p99 (мс) |
-|---|---|---:|---:|---:|---:|---:|
-| локально, 1 воркер, `async def` | `/search` | 50 | 55.3 | 885 | 1 083 | 1 947 |
-| локально, 1 воркер, `def` | `/search` | 50 | 43.5 | 1 144 | 1 526 | 2 269 |
-| локально, 4 воркери (`def`) | `/search` | 50 | 98.0 | 300 | 1 327 | 1 698 |
-| розгорнутий (Render free) | `/search` | 20 | _після деплою_ | | | |
-
-Для рядка розгорнутого сервісу: `oha -z 30s -c 20 "https://<адреса>/search?q=python+type+annotations&k=10"`.
-
-**Що пояснює кожен рядок (зв'язок з Lab 5–6).** Пошук — чистий CPU-код на Python, тож в одному процесі його в будь-який момент виконує лише один потік: це **GIL** з Lab 5. Тому `def` не дає більше пропускної здатності, ніж `async def`, а навпаки втрачає ~20 %: 40 потоків пулу змагаються за GIL і перемикаються кожні 5 мс, і хвіст (p99 2.3 с) довший. Перевага `def` не в швидкості, а в тому, що **винесення роботи в пул потоків** звільняє event loop (Lab 6: не блокувати цикл), — це видно в досліді з `/health` вище, а не в RPS. **Кілька процесів** обходять GIL так само, як `ProcessPoolExecutor` у Lab 5: 4 воркери на 2 ядрах дали 2.25× RPS і майже вчетверо нижчу p50. Стеля тут — два ядра (трохи більше за 2× вийшло тому, що однопроцесний `def` ще й втрачав час на боротьбу потоків за GIL); p95/p99 лишаються високими, бо 4 процеси ділять 2 ядра, і 50 клієнтів однаково стоять у черзі. Ціна — пам'ять: кожен воркер тримає власну копію індексу (~250 МіБ), тому на безкоштовному Render лишається 1 воркер.
-
-### Перевірки Lab 7
-
-```bash
-uv run ruff check . && uv run ruff format --check . && uv run pyright && uv run pytest
-```
-
-Методичка: [Lab 7 — FastAPI web search](https://github.com/rmalkevy/Programming-Practice-Projects/blob/main/courses/python/lab-07-fastapi-web-search.md) · [Нотатки](https://github.com/rmalkevy/Programming-Practice-Projects/blob/main/courses/python/lab-07-fastapi-web-search.notes.md)
-
-### Reflection — Lab 7
-
-1. **Шлях запиту.** Uvicorn приймає TCP-з'єднання, розбирає HTTP і викликає ASGI-застосунок `app(scope, receive, send)`; Starlette (основа FastAPI) проганяє middleware і знаходить маршрут; FastAPI розв'язує `Depends`, а Pydantic перевіряє й перетворює параметри; після функції маршруту FastAPI валідує відповідь за `response_model`, серіалізує JSON, і Uvicorn пише байти в сокет.
-2. **WSGI vs ASGI.** WSGI — синхронний виклик на запит, один потік/процес на запит у польоті. ASGI — `async`-виклик, тож один процес з event loop тримає тисячі з'єднань, поки вони чекають на I/O.
-3. **`k: int = Query(10, ge=1, le=100)` → 422.** FastAPI читає анотації (`typing.get_type_hints`, `Annotated`) під час реєстрації маршруту і будує Pydantic-модель параметрів; невдала валідація → `RequestValidationError` → 422. Це ті самі type hints з Lab 4, тільки їх читає бібліотека в runtime.
-4. **Pydantic vs dataclass.** Pydantic — на межі, де дані недовірені (запит, конфіг, JSON). Усередині — dataclass-и: вони дешевші, `slots=True` економить пам'ять на сотнях тисяч `Posting`, а перевіряти дані, які ми самі створили, немає сенсу.
-5. **`Depends`.** Перед викликом маршруту FastAPI викликає функцію-залежність і передає результат. У тестах `app.dependency_overrides[get_index] = lambda: tiny_index` — маршрут не змінюється.
-6. **30 мс CPU: `def` чи `async def`?** `def` (або `async def` + `await asyncio.to_thread`). З неправильним `async def` 50 запитів виконуються по черзі на циклі: останній чекає ~1.5 с, і весь цей час сервер не відповідає навіть на `/health`.
-7. **Конфіг з оточення.** Один і той самий образ запускається в dev і prod; різниться лише оточення (12-factor, III). Образ не повинен містити шляхів і секретів конкретного середовища.
-8. **p99: 1 vs 4 воркери.** В одному процесі GIL серіалізує CPU-роботу, черга росте, p99 = час очікування в черзі. 4 процеси — 4 інтерпретатори з власними GIL, як у Lab 5; на 2 ядрах пропускна здатність зростає до межі ядер.
-9. **`/health`.** Має перевіряти те, без чого сервіс марний: індекс завантажений. На 503 Render не пускає трафік на новий екземпляр (деплой не завершується), а для живого — перезапускає його після серії невдалих перевірок.
+- Lab 7: [FastAPI web search](https://github.com/rmalkevy/Programming-Practice-Projects/blob/main/courses/python/lab-07-fastapi-web-search.md) · [нотатки](https://github.com/rmalkevy/Programming-Practice-Projects/blob/main/courses/python/lab-07-fastapi-web-search.notes.md)
+- Lab 8: [Performance and semantic search](https://github.com/rmalkevy/Programming-Practice-Projects/blob/main/courses/python/lab-08-performance-and-semantic-search.md) · [нотатки](https://github.com/rmalkevy/Programming-Practice-Projects/blob/main/courses/python/lab-08-performance-and-semantic-search.notes.md)
+- Lab 1–6: посилання в [`docs/LABS.md`](docs/LABS.md).

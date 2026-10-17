@@ -2,7 +2,9 @@
 
 `peps.jsonl.gz` — 744 PEPs from [python/peps](https://github.com/python/peps)
 at commit `6068058b896441388bbf22f2607ab681193f6a3d` (2026-10-16), one PEP per
-JSONL line in the same `{"url", "title", "text"}` shape the Lab 6 crawler writes.
+JSONL line in the same `{"url", "title", "text"}` shape the Lab 6 crawler writes,
+plus a `topic` field (the PEP's `Topic:` header). `topic` is not indexed — Lab 8
+uses it as an objective relevance label for precision@5.
 
 PEPs are placed in the public domain or under CC0-1.0 by their authors, so the
 snapshot can be redistributed. It is committed (4 MB compressed) so that the

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import Counter
 from pathlib import Path
 from typing import cast
 
@@ -63,3 +64,99 @@ def make_snippet(
         return snippet
     pattern = re.compile("|".join(escaped), re.IGNORECASE)
     return pattern.sub(lambda match: f"**{match.group(0)}**", snippet)
+
+
+def read_document_text(path: str) -> str:
+    """Return the full text behind a ``DocMeta.path`` (``""`` if unreadable)."""
+    return _read_text(path)
+
+
+def source_url(path: str) -> str | None:
+    """Extract the original URL stored in a JSONL ``DocMeta.path``, if any."""
+    marker = "::url:"
+    if marker not in path:
+        return None
+    url = path.split(marker, maxsplit=1)[1]
+    return url if url.startswith(("http://", "https://")) else None
+
+
+def _term_pattern(terms: tuple[str, ...]) -> re.Pattern[str] | None:
+    escaped = sorted(
+        (re.escape(term) for term in set(terms) if term),
+        key=len,
+        reverse=True,
+    )
+    if not escaped:
+        return None
+    # Match at the start of a word so "py" does not light up "happy".
+    return re.compile(r"(?<!\w)(?:" + "|".join(escaped) + ")", re.IGNORECASE)
+
+
+def highlight_spans(text: str, terms: tuple[str, ...]) -> list[tuple[str, bool]]:
+    """Split *text* into ``(fragment, is_match)`` pairs for safe HTML rendering.
+
+    Unlike :func:`make_snippet` this never inserts markup into the text, so the
+    web layer can escape every fragment and wrap only the matches in ``<mark>``.
+    """
+    pattern = _term_pattern(terms)
+    if pattern is None or not text:
+        return [(text, False)] if text else []
+    spans: list[tuple[str, bool]] = []
+    cursor = 0
+    for match in pattern.finditer(text):
+        if match.start() > cursor:
+            spans.append((text[cursor : match.start()], False))
+        spans.append((match.group(0), True))
+        cursor = match.end()
+    if cursor < len(text):
+        spans.append((text[cursor:], False))
+    return spans
+
+
+def snippet_spans(
+    path: str,
+    terms: tuple[str, ...],
+    *,
+    width: int = 120,
+) -> list[tuple[str, bool]]:
+    """Window of ±``width`` characters around the first match, as spans."""
+    text = " ".join(_read_text(path).split())
+    if not text:
+        return []
+    pattern = _term_pattern(terms)
+    matches = list(pattern.finditer(text)) if pattern is not None else []
+    if not matches:
+        window = text[: 2 * width]
+        return [(window + ("…" if len(text) > len(window) else ""), False)]
+    # Centre the window on the spot where the most *different* query terms
+    # appear close together, not simply on the first match of any term.
+    # Sliding window over the (sorted) matches: O(number of matches).
+    best = matches[0]
+    best_count = 0
+    in_window: Counter[str] = Counter()
+    right = 0
+    for left, candidate in enumerate(matches):
+        while (
+            right < len(matches) and matches[right].start() < candidate.start() + width
+        ):
+            in_window[matches[right].group(0).casefold()] += 1
+            right += 1
+        if len(in_window) > best_count:
+            best, best_count = candidate, len(in_window)
+        key = matches[left].group(0).casefold()
+        in_window[key] -= 1
+        if not in_window[key]:
+            del in_window[key]
+    anchor = best.start()
+    start = max(0, anchor - width // 2)
+    end = min(len(text), start + 2 * width)
+    if start > 0:
+        # Do not cut a word in half at the left edge.
+        space = text.find(" ", start)
+        start = space + 1 if 0 <= space < anchor else start
+    spans = highlight_spans(text[start:end], terms)
+    if start > 0:
+        spans.insert(0, ("…", False))
+    if end < len(text):
+        spans.append(("…", False))
+    return spans

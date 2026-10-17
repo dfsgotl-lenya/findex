@@ -1,4 +1,6 @@
-# findex — лабораторні роботи 1–6
+# findex — лабораторні роботи 1–7
+
+**Жива адреса:** _буде тут після деплою на Render (див. «Деплой» у Lab 7)_ · API: `/docs`
 
 [![CI](https://github.com/dfsgotl-lenya/findex/actions/workflows/ci.yml/badge.svg)](https://github.com/dfsgotl-lenya/findex/actions/workflows/ci.yml)
 [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=dfsgotl-lenya_findex&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=dfsgotl-lenya_findex)
@@ -14,6 +16,8 @@
 | 3 | Об'єктна модель і ranking | `Mapping`-подібний `Index`, TF-IDF/BM25, Boolean AST, cache, snippets, Precision@5 |
 | 4 | Типізація, тестування, CLI, packaging | Strict typing, Hypothesis, coverage, Typer/Rich, CI, пакет `findex 0.4.0` |
 | 5 | Конкурентність і GIL | serial/threads/processes, benchmark, byte-identical індекси, GIL і free-threaded `3.13t` |
+| 6 | asyncio-краулер | `TaskGroup`, семафори, robots.txt, повтори з backoff, потоковий JSONL |
+| 7 | FastAPI, Pydantic, Docker, деплой | HTTP API + сторінка пошуку, `findex serve`, Dockerfile, Render, навантажувальні тести `oha` |
 
 ## Лабораторна робота №1
 
@@ -819,3 +823,133 @@ uv run pytest --basetemp .pytest_tmp -p no:cacheprovider
 5. Як `Retry-After` змінює звичайний exponential backoff?
 6. Чому `counter += 1` і спільний змінюваний стан вимагають синхронізації, навіть якщо програма асинхронна?
 7. Чому індексація має виконуватися після краулу, а не всередині корутини?
+
+## Лабораторна робота №7
+
+**Тема:** пошук у вебі — ASGI, FastAPI, Pydantic, `Depends` і `lifespan`, `def` vs `async def`, конфіг з оточення, Docker, деплой, навантажувальне тестування.
+
+### Корпус для демо
+
+Синтетичний корпус з Lab 1 (300 однакових документів) не годиться для сторінки, яку показують чужій людині, тому для веб-версії взято реальний текст: **744 Python Enhancement Proposals** з репозиторію [python/peps](https://github.com/python/peps) (public domain / CC0). Скрипт `benchmarks/make_pep_corpus.py` перетворює `.rst` на JSONL того самого формату, що пише краулер з Lab 6 (`url`, `title`, `text`), тож індексується звичайним `findex index`. Знімок корпусу лежить у `corpus/peps.jsonl.gz` (4 МБ), щоб збірка Docker не залежала від мережі.
+
+| Корпус | Документів | Словник | Постингів | Середня довжина | Індекс (pickle, з позиціями) |
+|---|---:|---:|---:|---:|---:|
+| PEPs @ `6068058` | 744 | 31 753 | 481 435 | 2 722.67 токена | 14.6 МБ |
+
+### Реалізовано
+
+- `src/findex/web/` — FastAPI-застосунок:
+  - `settings.py` — `Settings(BaseSettings)`: `INDEX_PATH`, `LOG_LEVEL`, `LOG_FORMAT`, `SEARCH_ROUTE`; читається з оточення або `.env`, у коді немає шляхів;
+  - `state.py` — `lifespan` один раз на процес завантажує індекс у потоці (`asyncio.to_thread`), поки сервер уже відповідає; залежності `get_state` → `get_loaded_index` → `get_index` (503, поки індекс не готовий);
+  - `models.py` — Pydantic-моделі **лише на межі**: `SearchResponse`, `SearchHit`, `DocumentResponse`, `StatsResponse`, `HealthResponse`, `ErrorResponse`;
+  - `service.py` — перетворення: всередині працюють dataclass-и з Lab 2–3 (`Posting`, `DocMeta`, `SearchResult`), назовні — Pydantic;
+  - `app.py` — маршрути, middleware з `X-Request-ID`, access-log і чистою відповіддю 500;
+  - `logs.py` — логи в stdout, текстові або JSON (`LOG_FORMAT=json`), з `request_id` у кожному рядку;
+  - `templates/` + `static/` — сторінка пошуку на Jinja2 + htmx.
+- `findex serve [--index PATH] [--port 8000] [--workers N]` — обгортка над uvicorn (`PORT` і `WEB_CONCURRENCY` теж читаються з оточення).
+- `Dockerfile` (два етапи, `uv.lock`, non-root), `.dockerignore`, `render.yaml`.
+
+### API
+
+| Маршрут | Що повертає | Коди |
+|---|---|---|
+| `GET /search?q=&k=&scorer=&page=` | `SearchResponse{query, scorer, page, k, total, pages, took_ms, results[]}` | 200, 422 (валідація або нерозбірний запит), 503 |
+| `GET /docs/{doc_id}` | повний текст і метадані документа | 200, 404, 422 |
+| `GET /stats` | документи, словник, постинги, розмір файлу, час завантаження, uptime | 200, 503 |
+| `GET /health` | `{"status": "ok"}` / `loading` / `error` | 200, 503 |
+| `GET /docs` | OpenAPI (Swagger UI), згенерований FastAPI | 200 |
+
+Обмеження параметрів задані типами: `q: str` 1–200 символів, `k: int` 1–50, `page: int` 1–100, `scorer: Literal["bm25", "tfidf"]`. Невідомий `scorer` чи `k=abc` → 422 з тілом `{"detail": [...]}` від Pydantic; синтаксична помилка в запиті (`(python`) → 422 `{"detail": "Invalid query: ..."}`.
+
+Пагінація: `top_k` тримає купу з `page·k` елементів (O(n log(page·k))), сніпети будуються лише для сторінки, що повертається.
+
+Неочікуваний виняток: у лог іде повний стек з `request_id`, клієнт отримує тільки
+`{"detail": "Internal Server Error", "request_id": "..."}` — той самий id, що в заголовку `X-Request-ID`, за ним рядок легко знайти в логах платформи.
+
+```text
+2026-10-17 14:30:09,843 INFO [a4bc213da7924a3c] findex.web: GET /doc/390 -> 200 4.8 ms
+```
+
+### Сторінка пошуку
+
+`GET /` — поле запиту, перемикач BM25/TF-IDF, результати з підсвіткою (`<mark>`), бали, посилання на оригінал на peps.python.org, перехід між сторінками. `GET /doc/{id}?q=...` — перегляд документа з підсвіченими термами запиту. htmx оновлює лише блок результатів під час набору (`/ui/results`, затримка 300 мс), а адресний рядок лишається на звичайному `/?q=...` (заголовок `HX-Push-Url`), тож посиланням можна поділитися. Без JavaScript форма працює звичайним GET.
+
+Сніпет: вікно ±120 символів ставиться там, де поруч зустрічається найбільше **різних** термів запиту (ковзне вікно по входженнях, O(кількість входжень)), а не на першому входженні будь-якого терма. Весь текст екранується Jinja2, `<mark>` додається лише навколо збігів — тест перевіряє, що `<script>` у запиті не виконується.
+
+### Тести
+
+`tests/test_web.py` — 34 тести через `TestClient` і `app.dependency_overrides[get_index]`, без справжнього файлу індексу (крім двох тестів самого `lifespan`, які зберігають крихітний індекс у `tmp_path`):
+
+- успішний пошук, TF-IDF + Boolean-запит, пагінація, порожній результат;
+- 422 для кожного невалідного параметра і для нерозбірного запиту;
+- `/docs/{id}`: 200, 404, 422 для нечислового id;
+- `/health` → 503, коли індекс не завантажений; 503 з `status=error`, коли файлу немає; `/search` і `/stats` → 503;
+- чистий 500 без стека і з `request_id` у лозі;
+- варіанти `def` і `async def` повертають однакові результати;
+- сторінка: підсвітка, екранування, повідомлення про помилку запиту, htmx-фрагмент, перегляд документа, CSS;
+- `findex serve` викликає `uvicorn.run` з правильними параметрами.
+
+### `def` чи `async def`: 20 одночасних запитів
+
+`benchmarks/web_concurrency.py` піднімає справжній uvicorn (1 воркер) з `SEARCH_ROUTE=def` і `SEARCH_ROUTE=async`, шле 20 одночасних `GET /search?q=python type annotations` і паралельно весь час пінгує `/health`. Медіана з 5 серій, 2 vCPU, Python 3.13:
+
+| Маршрут | Усі 20 (мс) | Найшвидший пошук (мс) | p50 пошуку (мс) | Найповільніший (мс) | `/health` p50 під навантаженням (мс) | `/health` max (мс) | Відповідей `/health` за серію |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `def` (пул потоків) | 472 | 56 | 435 | 480 | 38.2 | 141 | 9 |
+| `async def` (на event loop) | 372 | 24 | 352 | 384 | 5.6 | 348 | 4 |
+
+Сам пошук (~18 мс CPU на запит) у `async def` навіть трохи швидший: запити йдуть строго по черзі, без перемикання потоків і боротьби за GIL. Але поки триває серія, цикл подій зайнятий: `/health` чекав до 348 мс, тобто всю серію, і за серію встиг відповісти лише 4 рази. З `def` FastAPI віддає роботу в пул потоків, цикл вільний, і `/health` відповідає не пізніше ніж за 141 мс навіть під час серії. Платформа, яка перевіряє `/health` з таймаутом, з `async def` вважала б сервіс мертвим під навантаженням. **У коді лишається `def`**; `SEARCH_ROUTE=async` залишено лише як перемикач для цього досліду.
+
+### Docker
+
+```bash
+docker build -t findex .
+docker run --rm -p 8000:8000 findex                       # індекс уже всередині образу
+docker run --rm -p 8000:8000 -e INDEX_PATH=/data/peps.bin -v "$PWD/data:/data:ro" findex
+```
+
+- етап `builder` (`ghcr.io/astral-sh/uv:python3.13-bookworm-slim`): спершу `uv sync --locked --no-install-project` лише за `uv.lock` (кешований шар), потім сам проєкт як звичайний пакет (`--no-editable`), потім `findex index` будує індекс з `corpus/peps.jsonl.gz`;
+- етап `runtime` (`python:3.13-slim-bookworm`): лише `.venv` і `data/`, користувач `findex` (uid 10001), `HEALTHCHECK` на `/health`, `CMD ["findex", "serve", "--host", "0.0.0.0"]`;
+- образ перевірено локально: `id` у контейнері → `uid=10001(findex)`, `docker inspect` → `healthy`, пам'ять процесу ~250 МіБ (вміщається в безкоштовні 512 МБ Render).
+
+### Деплой (Render)
+
+1. <https://dashboard.render.com> → **New → Blueprint** → підключити цей репозиторій. Render прочитає `render.yaml`: Docker-сервіс, `healthCheckPath: /health`, змінні `LOG_FORMAT=json`, `LOG_LEVEL=INFO`, `WEB_CONCURRENCY=1`; `PORT` Render задає сам.
+2. Після першого деплою адреса має вигляд `https://findex-xxxx.onrender.com` — вписати її в перший рядок цього README.
+3. Логи (JSON, по рядку на запит з `request_id`) видно в **Logs** сервісу. Поки індекс вантажиться, `/health` віддає 503, і Render не перемикає трафік на новий екземпляр; якщо файл індексу пошкоджений, деплой не стане «live».
+4. Безкоштовний екземпляр засинає після 15 хв без запитів; перший запит після цього чекає ~30–60 с.
+
+### Навантаження: `oha`
+
+`bash benchmarks/load_test.sh data/peps.bin 30s 50` — 30 с, 50 клієнтів, `GET /search?q=python+type+annotations&k=10`, сирі JSON-звіти в `docs/lab07_oha/`. Машина: 2 vCPU.
+
+| Ціль | Маршрут | Конкурентність | RPS | p50 (мс) | p95 (мс) | p99 (мс) |
+|---|---|---:|---:|---:|---:|---:|
+| локально, 1 воркер, `async def` | `/search` | 50 | 55.3 | 885 | 1 083 | 1 947 |
+| локально, 1 воркер, `def` | `/search` | 50 | 43.5 | 1 144 | 1 526 | 2 269 |
+| локально, 4 воркери (`def`) | `/search` | 50 | 98.0 | 300 | 1 327 | 1 698 |
+| розгорнутий (Render free) | `/search` | 20 | _після деплою_ | | | |
+
+Для рядка розгорнутого сервісу: `oha -z 30s -c 20 "https://<адреса>/search?q=python+type+annotations&k=10"`.
+
+**Що пояснює кожен рядок (зв'язок з Lab 5–6).** Пошук — чистий CPU-код на Python, тож в одному процесі його в будь-який момент виконує лише один потік: це **GIL** з Lab 5. Тому `def` не дає більше пропускної здатності, ніж `async def`, а навпаки втрачає ~20 %: 40 потоків пулу змагаються за GIL і перемикаються кожні 5 мс, і хвіст (p99 2.3 с) довший. Перевага `def` не в швидкості, а в тому, що **винесення роботи в пул потоків** звільняє event loop (Lab 6: не блокувати цикл), — це видно в досліді з `/health` вище, а не в RPS. **Кілька процесів** обходять GIL так само, як `ProcessPoolExecutor` у Lab 5: 4 воркери на 2 ядрах дали 2.25× RPS і майже вчетверо нижчу p50. Стеля тут — два ядра (трохи більше за 2× вийшло тому, що однопроцесний `def` ще й втрачав час на боротьбу потоків за GIL); p95/p99 лишаються високими, бо 4 процеси ділять 2 ядра, і 50 клієнтів однаково стоять у черзі. Ціна — пам'ять: кожен воркер тримає власну копію індексу (~250 МіБ), тому на безкоштовному Render лишається 1 воркер.
+
+### Перевірки Lab 7
+
+```bash
+uv run ruff check . && uv run ruff format --check . && uv run pyright && uv run pytest
+```
+
+Методичка: [Lab 7 — FastAPI web search](https://github.com/rmalkevy/Programming-Practice-Projects/blob/main/courses/python/lab-07-fastapi-web-search.md) · [Нотатки](https://github.com/rmalkevy/Programming-Practice-Projects/blob/main/courses/python/lab-07-fastapi-web-search.notes.md)
+
+### Reflection — Lab 7
+
+1. **Шлях запиту.** Uvicorn приймає TCP-з'єднання, розбирає HTTP і викликає ASGI-застосунок `app(scope, receive, send)`; Starlette (основа FastAPI) проганяє middleware і знаходить маршрут; FastAPI розв'язує `Depends`, а Pydantic перевіряє й перетворює параметри; після функції маршруту FastAPI валідує відповідь за `response_model`, серіалізує JSON, і Uvicorn пише байти в сокет.
+2. **WSGI vs ASGI.** WSGI — синхронний виклик на запит, один потік/процес на запит у польоті. ASGI — `async`-виклик, тож один процес з event loop тримає тисячі з'єднань, поки вони чекають на I/O.
+3. **`k: int = Query(10, ge=1, le=100)` → 422.** FastAPI читає анотації (`typing.get_type_hints`, `Annotated`) під час реєстрації маршруту і будує Pydantic-модель параметрів; невдала валідація → `RequestValidationError` → 422. Це ті самі type hints з Lab 4, тільки їх читає бібліотека в runtime.
+4. **Pydantic vs dataclass.** Pydantic — на межі, де дані недовірені (запит, конфіг, JSON). Усередині — dataclass-и: вони дешевші, `slots=True` економить пам'ять на сотнях тисяч `Posting`, а перевіряти дані, які ми самі створили, немає сенсу.
+5. **`Depends`.** Перед викликом маршруту FastAPI викликає функцію-залежність і передає результат. У тестах `app.dependency_overrides[get_index] = lambda: tiny_index` — маршрут не змінюється.
+6. **30 мс CPU: `def` чи `async def`?** `def` (або `async def` + `await asyncio.to_thread`). З неправильним `async def` 50 запитів виконуються по черзі на циклі: останній чекає ~1.5 с, і весь цей час сервер не відповідає навіть на `/health`.
+7. **Конфіг з оточення.** Один і той самий образ запускається в dev і prod; різниться лише оточення (12-factor, III). Образ не повинен містити шляхів і секретів конкретного середовища.
+8. **p99: 1 vs 4 воркери.** В одному процесі GIL серіалізує CPU-роботу, черга росте, p99 = час очікування в черзі. 4 процеси — 4 інтерпретатори з власними GIL, як у Lab 5; на 2 ядрах пропускна здатність зростає до межі ядер.
+9. **`/health`.** Має перевіряти те, без чого сервіс марний: індекс завантажений. На 503 Render не пускає трафік на новий екземпляр (деплой не завершується), а для живого — перезапускає його після серії невдалих перевірок.

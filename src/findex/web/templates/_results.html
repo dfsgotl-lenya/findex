@@ -1,0 +1,38 @@
+{% if error %}
+  <p class="notice">That query could not be read: {{ error }}. Use plain words, <code>AND</code> / <code>OR</code> / <code>NOT</code>, parentheses or "quoted phrases".</p>
+{% elif result is none %}
+  <section class="intro">
+    <p class="lede">Search all {{ num_docs }} Python Enhancement Proposals — the design documents behind every feature of the language.</p>
+    <ul class="tries">
+      <li><a href="/?q=walrus+operator">walrus operator</a></li>
+      <li><a href="/?q=%22pattern+matching%22">"pattern matching"</a></li>
+      <li><a href="/?q=gil+OR+subinterpreters">gil OR subinterpreters</a></li>
+      <li><a href="/?q=type+hints+NOT+stub">type hints NOT stub</a></li>
+    </ul>
+  </section>
+{% elif result.total == 0 %}
+  <p class="notice">No PEP contains all of <strong>{{ q }}</strong>. Try fewer words or join them with <code>OR</code>.</p>
+{% else %}
+  <p class="summary"><strong>{{ result.total }}</strong> PEP{{ '' if result.total == 1 else 's' }} match, ranked by {{ 'BM25' if result.scorer == 'bm25' else 'TF-IDF' }} in {{ '%.1f' % result.took_ms }} ms{% if result.pages > 1 %}. Page {{ result.page }} of {{ result.pages }}{% endif %}.</p>
+  <ol class="hits" start="{{ result.hits[0].rank if result.hits else 1 }}">
+    {% for hit in result.hits %}
+    <li class="hit">
+      <h2><a href="/doc/{{ hit.result.doc_id }}?q={{ q|urlencode }}">{{ hit.result.title }}</a></h2>
+      {% if hit.url %}<p class="source">{{ hit.url.split('//', 1)[1].rstrip('/') }}</p>{% endif %}
+      <p class="snippet">{% for text, match in hit.spans %}{% if match %}<mark>{{ text }}</mark>{% else %}{{ text }}{% endif %}{% endfor %}</p>
+      <p class="score" title="{{ result.scorer }} score">score {{ '%.2f' % hit.result.score }}</p>
+    </li>
+    {% endfor %}
+  </ol>
+  {% if result.pages > 1 %}
+  {% set last = [result.pages, 100]|min %}
+  <nav class="pager" aria-label="Result pages">
+    {% if result.page > 1 %}<a rel="prev" href="/?q={{ q|urlencode }}&scorer={{ scorer }}&k={{ k }}&page={{ result.page - 1 }}">Previous</a>{% endif %}
+    {% for p in range([1, result.page - 3]|max, [last, result.page + 3]|min + 1) %}
+      {% if p == result.page %}<span aria-current="page">{{ p }}</span>
+      {% else %}<a href="/?q={{ q|urlencode }}&scorer={{ scorer }}&k={{ k }}&page={{ p }}">{{ p }}</a>{% endif %}
+    {% endfor %}
+    {% if result.page < last %}<a rel="next" href="/?q={{ q|urlencode }}&scorer={{ scorer }}&k={{ k }}&page={{ result.page + 1 }}">Next</a>{% endif %}
+  </nav>
+  {% endif %}
+{% endif %}

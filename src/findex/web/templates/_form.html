@@ -1,0 +1,14 @@
+<form class="search" action="/" method="get" role="search"
+      hx-get="/ui/results" hx-target="#results" hx-push-url="true"
+      hx-trigger="submit, input changed delay:300ms from:#q, change from:.scorer input">
+  <label class="visually-hidden" for="q">Search PEPs</label>
+  <input id="q" name="q" type="search" value="{{ q }}" maxlength="200"
+         placeholder="walrus operator, &quot;pattern matching&quot;, async NOT generator"
+         autocomplete="off" autofocus>
+  <fieldset class="scorer">
+    <legend class="visually-hidden">Ranking</legend>
+    <label><input type="radio" name="scorer" value="bm25" {% if scorer == 'bm25' %}checked{% endif %}> BM25</label>
+    <label><input type="radio" name="scorer" value="tfidf" {% if scorer == 'tfidf' %}checked{% endif %}> TF-IDF</label>
+  </fieldset>
+  <button type="submit">Search</button>
+</form>

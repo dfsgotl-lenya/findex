@@ -489,5 +489,56 @@ def stats_command(
         raise typer.Exit(code=1) from None
 
 
+@app.command("serve")
+def serve_command(
+    index_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--index",
+            help="Файл індексу; за замовчуванням INDEX_PATH з оточення.",
+        ),
+    ] = None,
+    host: Annotated[str, typer.Option("--host", help="Адреса прослуховування.")] = (
+        "127.0.0.1"
+    ),
+    port: Annotated[
+        int, typer.Option("--port", min=1, max=65535, envvar="PORT", help="Порт.")
+    ] = 8000,
+    workers: Annotated[
+        int,
+        typer.Option("--workers", min=1, help="Кількість процесів uvicorn."),
+    ] = 1,
+    reload: Annotated[
+        bool, typer.Option("--reload", help="Перезапуск при зміні коду (dev).")
+    ] = False,
+) -> None:
+    """Запустити веб-сервіс (FastAPI + uvicorn): API і сторінку пошуку."""
+    import os
+
+    import uvicorn
+
+    if index_path is not None:
+        # Settings are read from the environment in every worker process, so the
+        # CLI option is passed the 12-factor way rather than as a global.
+        os.environ["INDEX_PATH"] = str(index_path)
+    target = os.environ.get("INDEX_PATH", "data/peps.bin")
+    if not Path(target).exists():
+        error_console.print(
+            f"Попередження: індекс {target} не знайдено; /health віддаватиме 503."
+        )
+    console.print(f"findex serve: http://{host}:{port}  (index={target})")
+    uvicorn.run(
+        "findex.web:app",
+        host=host,
+        port=port,
+        workers=workers,
+        reload=reload,
+        access_log=False,
+        proxy_headers=True,
+        forwarded_allow_ips="*",
+        timeout_graceful_shutdown=10,
+    )
+
+
 if __name__ == "__main__":
     app()

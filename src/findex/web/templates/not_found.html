@@ -1,0 +1,5 @@
+{% extends "base.html" %}
+{% block title %}Not found — {{ site_name }}{% endblock %}
+{% block content %}
+<p class="notice">There is no document #{{ doc_id }} in this index. <a href="/{% if q %}?q={{ q|urlencode }}{% endif %}">Return to search</a>.</p>
+{% endblock %}

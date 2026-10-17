@@ -27,3 +27,6 @@ htmlcov/
 dist/
 
 .pytest_tmp_lab06/
+
+# Lab 7 load-test reports are committed on purpose
+!docs/lab07_oha/*.json

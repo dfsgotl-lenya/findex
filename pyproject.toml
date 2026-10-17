@@ -1,6 +1,6 @@
 [project]
 name = "findex"
-version = "0.7.0"
+version = "1.0.0"
 description = "Educational full-text search engine built through Python laboratory exercises"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -13,6 +13,7 @@ dependencies = [
     "jinja2>=3.1.6",
     "pydantic-settings>=2.16.0",
     "numpy>=2.5.3",
+    "wordllama>=0.4.0.post1",
 ]
 
 [dependency-groups]

@@ -12,6 +12,7 @@ from typing import Annotated, Literal
 from fastapi import Depends, HTTPException, Request, status
 
 from ..index import Index
+from ..semantic import Embedder, SemanticIndex, load_embedder
 from ..store import load
 
 logger = logging.getLogger("findex.web")
@@ -24,12 +25,16 @@ class IndexState:
     """Mutable holder stored on ``app.state``; only the lifespan writes to it."""
 
     path: Path
+    semantic_dir: Path | None = None
     status: LoadStatus = "loading"
     index: Index | None = None
     error: str | None = None
     load_seconds: float = 0.0
     index_bytes: int = 0
     postings: int = 0
+    semantic: SemanticIndex | None = None
+    embedder: Embedder | None = None
+    semantic_error: str | None = None
     started_at: float = field(default_factory=time.monotonic)
 
 
@@ -38,9 +43,33 @@ def _load_blocking(state: IndexState) -> None:
     index = load(state.path)
     state.postings = sum(len(items) for items in index.postings.values())
     state.index_bytes = state.path.stat().st_size
+    index.vector_scorer()  # build the NumPy postings once, not on 1st request
+    _load_semantic(state)
     state.load_seconds = time.perf_counter() - started
     state.index = index
     state.status = "ok"
+
+
+def _load_semantic(state: IndexState) -> None:
+    """Optional: embeddings for mode=semantic/hybrid. Never fatal."""
+    directory = state.semantic_dir
+    if directory is None or not (directory / "meta.json").exists():
+        state.semantic_error = f"no semantic index at {directory}"
+        logger.info("semantic search disabled: %s", state.semantic_error)
+        return
+    try:
+        semantic = SemanticIndex.load(directory)
+        state.embedder = load_embedder(semantic.model)
+        state.semantic = semantic
+        logger.info(
+            "semantic index: %d chunks x %d (%s)",
+            semantic.num_chunks,
+            semantic.dim,
+            semantic.model,
+        )
+    except Exception as exc:  # noqa: BLE001 - keyword search still works
+        state.semantic_error = f"{type(exc).__name__}: {exc}"
+        logger.exception("semantic index failed to load: %s", directory)
 
 
 async def load_index(state: IndexState) -> None:
@@ -91,3 +120,18 @@ def get_index(
 
 
 IndexDep = Annotated[Index, Depends(get_index)]
+
+
+@dataclass(frozen=True, slots=True)
+class SemanticDeps:
+    """What mode=semantic/hybrid needs; both ``None`` when unavailable."""
+
+    index: SemanticIndex | None = None
+    embedder: Embedder | None = None
+
+
+def get_semantic(state: Annotated[IndexState, Depends(get_state)]) -> SemanticDeps:
+    return SemanticDeps(state.semantic, state.embedder)
+
+
+SemanticDep = Annotated[SemanticDeps, Depends(get_semantic)]

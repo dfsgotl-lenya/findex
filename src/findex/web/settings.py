@@ -28,6 +28,13 @@ class Settings(BaseSettings):
         default=Path("data/peps.bin"),
         description="Saved findex index (pickle or JSON) loaded once at startup.",
     )
+    semantic_path: Path | None = Field(
+        default=None,
+        description=(
+            "Directory written by `findex embed`; defaults to "
+            "<index_path>.semantic. Missing directory = keyword search only."
+        ),
+    )
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     log_format: Literal["text", "json"] = "text"
     site_name: str = "findex"
@@ -35,6 +42,10 @@ class Settings(BaseSettings):
     # as a naive ``async def`` that runs the CPU-bound scorer on the event loop.
     # The default is the variant that does not block the loop.
     search_route: Literal["def", "async"] = "def"
+
+    @property
+    def semantic_dir(self) -> Path:
+        return self.semantic_path or self.index_path.with_suffix(".semantic")
 
 
 @lru_cache(maxsize=1)

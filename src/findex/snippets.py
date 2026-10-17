@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-from collections import Counter
 from functools import lru_cache
 from pathlib import Path
 from typing import cast
@@ -23,6 +22,7 @@ def _read_text(path: str) -> str:
 
 def clear_text_cache() -> None:
     _read_text.cache_clear()
+    _flat_text.cache_clear()
 
 
 def _read_text_uncached(path: str) -> str:
@@ -96,6 +96,7 @@ def source_url(path: str) -> str | None:
     return url if url.startswith(("http://", "https://")) else None
 
 
+@lru_cache(maxsize=1024)
 def _term_pattern(terms: tuple[str, ...]) -> re.Pattern[str] | None:
     escaped = sorted(
         (re.escape(term) for term in set(terms) if term),
@@ -104,8 +105,8 @@ def _term_pattern(terms: tuple[str, ...]) -> re.Pattern[str] | None:
     )
     if not escaped:
         return None
-    # Match at the start of a word so "py" does not light up "happy".
-    return re.compile(r"(?<!\w)(?:" + "|".join(escaped) + ")", re.IGNORECASE)
+    # Whole words only: "in" must not light up "introduced" or "within".
+    return re.compile(r"(?<!\w)(?:" + "|".join(escaped) + r")(?!\w)", re.IGNORECASE)
 
 
 def highlight_spans(text: str, terms: tuple[str, ...]) -> list[tuple[str, bool]]:
@@ -129,41 +130,91 @@ def highlight_spans(text: str, terms: tuple[str, ...]) -> list[tuple[str, bool]]
     return spans
 
 
+@lru_cache(maxsize=512)
+def _flat_text(path: str) -> tuple[str, str]:
+    """``(text, lowered)``: whitespace collapsed once, lower-cased once (cached)."""
+    text = " ".join(_read_text(path).split())
+    return text, text.lower()
+
+
+def _is_word_char(char: str) -> bool:
+    return char.isalnum() or char == "_"
+
+
+def _word_positions(
+    text: str, lowered: str, term: str, start: int = 0, end: int | None = None
+) -> list[int]:
+    """Start offsets of *term* as a whole word inside ``[start, end)``.
+
+    ``str.find`` on pre-lowered text runs in C and was ~25x faster than an
+    IGNORECASE regex with look-arounds on 100 KB PEPs. If lowering changed the
+    length (rare non-ASCII cases) offsets would not line up, so fall back to
+    the regex there.
+    """
+    needle = term.lower()
+    stop = len(lowered) if end is None else min(end, len(lowered))
+    if len(lowered) != len(text) or not needle:
+        pattern = _term_pattern((term,))
+        if pattern is None:
+            return []
+        return [m.start() for m in pattern.finditer(text, start, stop)]
+    found: list[int] = []
+    at = lowered.find(needle, start, stop)
+    while at >= 0:
+        after = at + len(needle)
+        if (at == 0 or not _is_word_char(lowered[at - 1])) and (
+            after == len(lowered) or not _is_word_char(lowered[after])
+        ):
+            found.append(at)
+        at = lowered.find(needle, at + 1, stop)
+    return found
+
+
+def _best_anchor(
+    text: str, lowered: str, terms: tuple[str, ...], width: int
+) -> int | None:
+    """Position where the most *different* query terms occur within ``width``.
+
+    Anchors are the occurrences of the term that is rarest *in this document*
+    (``str.count`` in C picks it); for each anchor the other terms are only
+    searched inside the window. (The first version slid a window over *every*
+    match in Python — for "python" in a long PEP that is thousands of
+    iterations per result; the profiler showed it as ~65 % of a web search.)
+    """
+    unique = [t for t in dict.fromkeys(terms) if t and t.lower() in lowered]
+    if not unique:
+        return None
+    unique.sort(key=lambda term: lowered.count(term.lower()))
+    rarest, others = unique[0], unique[1:]
+    anchors = _word_positions(text, lowered, rarest)
+    if not anchors:
+        # Only sub-word hits for the rarest term; try the next one.
+        return _best_anchor(text, lowered, tuple(others), width) if others else None
+    best, best_count = anchors[0], 0
+    for anchor in anchors[:200]:
+        lo, hi = max(0, anchor - width), anchor + width
+        count = 1 + sum(1 for t in others if _word_positions(text, lowered, t, lo, hi))
+        if count > best_count:
+            best, best_count = anchor, count
+            if count == len(unique):
+                break
+    return best
+
+
 def snippet_spans(
     path: str,
     terms: tuple[str, ...],
     *,
     width: int = 120,
 ) -> list[tuple[str, bool]]:
-    """Window of ±``width`` characters around the first match, as spans."""
-    text = " ".join(_read_text(path).split())
+    """About ``2·width`` characters around the densest cluster of query terms."""
+    text, lowered = _flat_text(path)
     if not text:
         return []
-    pattern = _term_pattern(terms)
-    matches = list(pattern.finditer(text)) if pattern is not None else []
-    if not matches:
+    anchor = _best_anchor(text, lowered, terms, width)
+    if anchor is None:
         window = text[: 2 * width]
         return [(window + ("…" if len(text) > len(window) else ""), False)]
-    # Centre the window on the spot where the most *different* query terms
-    # appear close together, not simply on the first match of any term.
-    # Sliding window over the (sorted) matches: O(number of matches).
-    best = matches[0]
-    best_count = 0
-    in_window: Counter[str] = Counter()
-    right = 0
-    for left, candidate in enumerate(matches):
-        while (
-            right < len(matches) and matches[right].start() < candidate.start() + width
-        ):
-            in_window[matches[right].group(0).casefold()] += 1
-            right += 1
-        if len(in_window) > best_count:
-            best, best_count = candidate, len(in_window)
-        key = matches[left].group(0).casefold()
-        in_window[key] -= 1
-        if not in_window[key]:
-            del in_window[key]
-    anchor = best.start()
     start = max(0, anchor - width // 2)
     end = min(len(text), start + 2 * width)
     if start > 0:

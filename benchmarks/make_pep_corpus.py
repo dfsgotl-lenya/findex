@@ -81,6 +81,9 @@ def pep_record(path: Path) -> dict[str, str] | None:
     return {
         "url": f"https://peps.python.org/pep-{pep:04d}/",
         "title": f"PEP {pep} – {title}",
+        # Kept out of "text" on purpose: Lab 8 uses it as an objective
+        # relevance label, so it must not be searchable.
+        "topic": headers.get("Topic", ""),
         "text": f"{title}\n\n{meta_line}\n\n{body}",
     }
 

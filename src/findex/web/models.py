@@ -13,6 +13,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 ScorerName = Literal["bm25", "tfidf"]
+ModeName = Literal["keyword", "semantic", "hybrid"]
 
 
 class SearchHit(BaseModel):
@@ -26,6 +27,7 @@ class SearchHit(BaseModel):
 class SearchResponse(BaseModel):
     query: str
     scorer: ScorerName
+    mode: ModeName
     page: int = Field(ge=1)
     k: int = Field(ge=1, description="Results per page.")
     total: int = Field(ge=0, description="Documents matching the query.")
@@ -52,11 +54,14 @@ class StatsResponse(BaseModel):
     index_bytes: int
     load_seconds: float
     uptime_seconds: float
+    semantic_model: str | None = None
+    semantic_chunks: int | None = None
 
 
 class HealthResponse(BaseModel):
     status: Literal["ok", "loading", "error"]
     documents: int | None = None
+    semantic: bool = False
     detail: str | None = None
 
 

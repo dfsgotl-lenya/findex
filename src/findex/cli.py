@@ -26,6 +26,7 @@ from rich.table import Table
 
 from .crawler import CrawlStats
 from .crawler import crawl as async_crawl
+from .index import Index
 from .parallel import ExecutorName, build_parallel_index, collect_document_paths
 from .ranking import BM25, Scorer, SearchResult, TfIdf
 from .search import search
@@ -34,6 +35,7 @@ from .store import open_index, save
 Engine = Literal["merge", "set"]
 ScorerName = Literal["bm25", "tfidf"]
 IndexFormat = Literal["pickle", "json"]
+SearchMode = Literal["keyword", "semantic", "hybrid"]
 
 app = typer.Typer(
     name="findex",
@@ -397,6 +399,10 @@ def crawl_command(
     )
 
 
+def _semantic_dir(index_path: Path, explicit: Path | None) -> Path:
+    return explicit if explicit is not None else index_path.with_suffix(".semantic")
+
+
 @app.command("search")
 def search_command(
     index_path: Annotated[Path, typer.Argument(help="Файл збереженого індексу.")],
@@ -406,6 +412,19 @@ def search_command(
         ScorerName,
         typer.Option("--scorer", help="Модель ранжування."),
     ] = "bm25",
+    mode: Annotated[
+        SearchMode,
+        typer.Option(
+            "--mode", help="keyword (Lab 3), semantic (ембединги) або hybrid (RRF)."
+        ),
+    ] = "keyword",
+    semantic_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--semantic",
+            help="Каталог findex embed; за замовчуванням <index>.semantic.",
+        ),
+    ] = None,
     engine: Annotated[
         Engine,
         typer.Option("--engine", help="Boolean engine."),
@@ -424,13 +443,23 @@ def search_command(
         if k < 1:
             raise ValueError("-k має бути >= 1")
         with open_index(index_path, format=format) as index:
-            results = search(
-                index,
-                query,
-                scorer=_scorer_from_name(scorer),
-                k=k,
-                engine=engine,
-            )
+            if mode == "keyword":
+                results = search(
+                    index,
+                    query,
+                    scorer=_scorer_from_name(scorer),
+                    k=k,
+                    engine=engine,
+                )
+            else:
+                results = _semantic_results(
+                    index,
+                    query,
+                    mode=mode,
+                    scorer=_scorer_from_name(scorer),
+                    k=k,
+                    directory=_semantic_dir(index_path, semantic_dir),
+                )
         if as_json:
             _json_lines(results)
         else:
@@ -439,11 +468,116 @@ def search_command(
         OSError,
         ValueError,
         TypeError,
+        LookupError,
         EOFError,
         pickle.UnpicklingError,
     ) as exc:
         error_console.print(f"Помилка: {exc}")
         raise typer.Exit(code=1) from None
+
+
+def _semantic_results(
+    index: Index,
+    query: str,
+    *,
+    mode: SearchMode,
+    scorer: Scorer,
+    k: int,
+    directory: Path,
+) -> list[SearchResult]:
+    from .semantic import SemanticIndex, load_embedder, search_mode
+    from .snippets import make_snippet
+
+    if not (directory / "meta.json").exists():
+        raise LookupError(
+            f"немає семантичного індексу {directory}; спершу: findex embed"
+        )
+    semantic = SemanticIndex.load(directory)
+    found = search_mode(
+        index,
+        query,
+        mode=mode,
+        scorer=scorer,
+        k=k,
+        semantic=semantic,
+        embedder=load_embedder(semantic.model),
+    )
+    results: list[SearchResult] = []
+    for hit in found.hits:
+        meta = index.doc_meta[hit.doc_id]
+        if hit.chunk is not None:
+            passage = " ".join(semantic.passage(index, hit.chunk).split())
+            snippet = passage[:160] + ("…" if len(passage) > 160 else "")
+        else:
+            snippet = make_snippet(meta.path, found.terms, width=80)
+        results.append(
+            SearchResult(
+                doc_id=hit.doc_id, score=hit.score, title=meta.title, snippet=snippet
+            )
+        )
+    return results
+
+
+@app.command("embed")
+def embed_command(
+    index_path: Annotated[Path, typer.Argument(help="Файл збереженого індексу.")],
+    model: Annotated[
+        str,
+        typer.Option(
+            "--model",
+            help="wordllama (вбудована, офлайн) або назва sentence-transformers "
+            "моделі, напр. all-MiniLM-L6-v2.",
+        ),
+    ] = "wordllama",
+    out: Annotated[
+        Path | None,
+        typer.Option("--out", help="Каталог результату; <index>.semantic."),
+    ] = None,
+    chunk_words: Annotated[
+        int, typer.Option("--chunk-words", min=20, help="Слів у фрагменті.")
+    ] = 200,
+    format: Annotated[
+        IndexFormat | None,
+        typer.Option("--format", help="Формат серіалізації."),
+    ] = None,
+) -> None:
+    """Порахувати ембединги фрагментів документів для семантичного пошуку."""
+    from .semantic import build_semantic_index, load_embedder
+
+    directory = _semantic_dir(index_path, out)
+    try:
+        with open_index(index_path, format=format) as index:
+            embedder = load_embedder(model)
+            started = time.perf_counter()
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("{task.description}"),
+                BarColumn(),
+                TextColumn("{task.completed}/{task.total} фрагментів"),
+                TimeRemainingColumn(),
+                console=console,
+            ) as progress:
+                task_id = progress.add_task(f"Ембединги ({model})", total=None)
+
+                def on_progress(done: int, total: int) -> None:
+                    progress.update(task_id, completed=done, total=total)
+
+                semantic = build_semantic_index(
+                    index,
+                    embedder,
+                    max_words=chunk_words,
+                    on_progress=on_progress,
+                )
+            elapsed = time.perf_counter() - started
+        semantic.save(directory)
+    except (OSError, ValueError, EOFError, pickle.UnpicklingError) as exc:
+        error_console.print(f"Помилка: {exc}")
+        raise typer.Exit(code=1) from None
+    console.print(
+        f"Збережено {directory}: {semantic.num_chunks} фрагментів × "
+        f"{semantic.dim} вимірів ({semantic.embeddings.nbytes / 1024**2:.1f} МіБ), "
+        f"{elapsed:.1f} с"
+    )
 
 
 @app.command("stats")

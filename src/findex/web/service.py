@@ -11,10 +11,9 @@ import time
 from dataclasses import dataclass
 
 from ..index import Index
-from ..query import parse
 from ..ranking import BM25, Scorer, SearchResult, TfIdf
-from ..search import rank
-from ..snippets import read_document_text, snippet_spans, source_url
+from ..semantic import Embedder, SearchMode, SemanticIndex, search_mode
+from ..snippets import highlight_spans, read_document_text, snippet_spans, source_url
 from .models import (
     DocumentResponse,
     ScorerName,
@@ -27,6 +26,10 @@ Spans = list[tuple[str, bool]]
 
 class QueryError(ValueError):
     """The query string could not be parsed or evaluated."""
+
+
+class SemanticUnavailable(LookupError):
+    """mode=semantic/hybrid requested but no embeddings are loaded."""
 
 
 class UnknownDocument(LookupError):
@@ -47,6 +50,7 @@ class Hit:
 class ResultPage:
     query: str
     scorer: ScorerName
+    mode: SearchMode
     page: int
     k: int
     total: int
@@ -63,6 +67,16 @@ def scorer_from_name(name: ScorerName) -> Scorer:
     return BM25() if name == "bm25" else TfIdf()
 
 
+def _passage_spans(passage: str, terms: tuple[str, ...], width: int = 240) -> Spans:
+    """Snippet for a semantic hit: the start of its best passage, highlighted."""
+    text = " ".join(passage.split())
+    window = text[:width]
+    if len(text) > width:
+        cut = window.rfind(" ")
+        window = (window[:cut] if cut > width // 2 else window) + "…"
+    return highlight_spans(window, terms)
+
+
 def search_page(
     index: Index,
     query: str,
@@ -70,43 +84,59 @@ def search_page(
     scorer: ScorerName = "bm25",
     k: int = 10,
     page: int = 1,
+    mode: SearchMode = "keyword",
+    semantic: SemanticIndex | None = None,
+    embedder: Embedder | None = None,
 ) -> ResultPage:
-    """Rank every matching document and return one page of results.
+    """Rank documents in the requested mode and return one page of results.
 
-    ``top_k`` keeps a heap of ``page * k`` items, so deep pages cost
-    O(n log(page·k)); snippets are only built for the page that is returned.
+    Ranking keeps only ``page * k`` items (``argpartition`` / heap), and
+    snippets are built only for the page that is returned.
     """
     started = time.perf_counter()
     try:
-        tree = parse(query)
-        matched = index.evaluate_query(query)
+        found = search_mode(
+            index,
+            query,
+            mode=mode,
+            scorer=scorer_from_name(scorer),
+            k=page * k,
+            semantic=semantic,
+            embedder=embedder,
+        )
+    except LookupError as exc:
+        raise SemanticUnavailable(str(exc)) from exc
     except ValueError as exc:
         raise QueryError(str(exc)) from exc
 
-    terms = tree.positive_terms()
-    ranked = rank(index, terms, matched, scorer_from_name(scorer), page * k)
-    window = ranked[(page - 1) * k : page * k]
-
     hits: list[Hit] = []
-    for offset, result in enumerate(window):
-        meta = index.doc_meta[result.doc_id]
+    window = found.hits[(page - 1) * k : page * k]
+    for offset, mode_hit in enumerate(window):
+        meta = index.doc_meta[mode_hit.doc_id]
+        if mode_hit.chunk is not None and semantic is not None:
+            spans = _passage_spans(semantic.passage(index, mode_hit.chunk), found.terms)
+        else:
+            spans = snippet_spans(meta.path, found.terms)
         hits.append(
             Hit(
-                result=result,
+                result=SearchResult(
+                    doc_id=mode_hit.doc_id, score=mode_hit.score, title=meta.title
+                ),
                 rank=(page - 1) * k + offset + 1,
                 url=source_url(meta.path),
-                spans=snippet_spans(meta.path, terms),
+                spans=spans,
             )
         )
     took_ms = (time.perf_counter() - started) * 1000
     return ResultPage(
         query=query,
         scorer=scorer,
+        mode=mode,
         page=page,
         k=k,
-        total=len(matched),
+        total=found.total,
         took_ms=took_ms,
-        terms=terms,
+        terms=found.terms,
         hits=tuple(hits),
     )
 
@@ -116,6 +146,7 @@ def to_response(result_page: ResultPage) -> SearchResponse:
     return SearchResponse(
         query=result_page.query,
         scorer=result_page.scorer,
+        mode=result_page.mode,
         page=result_page.page,
         k=result_page.k,
         total=result_page.total,

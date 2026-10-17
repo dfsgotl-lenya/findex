@@ -25,11 +25,13 @@ COPY src ./src
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev --no-editable
 
-# 3) Bake the demo index into the image (simple and fine for a portfolio demo).
+# 3) Bake the demo index and its chunk embeddings into the image (Lab 8:
+#    WordLlama weights ship inside its wheel, so no download is needed).
 COPY corpus ./corpus
 RUN mkdir -p data \
  && gunzip -c corpus/peps.jsonl.gz > data/peps.jsonl \
- && .venv/bin/findex index data/peps.jsonl --out data/peps.bin --positions
+ && .venv/bin/findex index data/peps.jsonl --out data/peps.bin --positions \
+ && .venv/bin/findex embed data/peps.bin --model wordllama
 
 # ---------------------------------------------------------------- runtime
 FROM python:3.13-slim-bookworm AS runtime

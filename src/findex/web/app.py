@@ -26,6 +26,7 @@ from .models import (
     DocumentResponse,
     ErrorResponse,
     HealthResponse,
+    ModeName,
     ScorerName,
     SearchResponse,
     StatsResponse,
@@ -33,13 +34,22 @@ from .models import (
 from .service import (
     QueryError,
     ResultPage,
+    SemanticUnavailable,
     UnknownDocument,
     get_document,
     search_page,
     to_response,
 )
 from .settings import Settings, get_settings
-from .state import IndexDep, IndexState, get_loaded_index, get_state, load_index
+from .state import (
+    IndexDep,
+    IndexState,
+    SemanticDep,
+    SemanticDeps,
+    get_loaded_index,
+    get_state,
+    load_index,
+)
 
 logger = logging.getLogger("findex.web")
 
@@ -59,17 +69,51 @@ QueryParam = Annotated[
 KParam = Annotated[int, Query(ge=1, le=MAX_K, description="Results per page")]
 PageParam = Annotated[int, Query(ge=1, le=MAX_PAGE, description="1-based page")]
 ScorerParam = Annotated[ScorerName, Query(description="Ranking model")]
+ModeParam = Annotated[
+    ModeName,
+    Query(description="keyword (BM25/TF-IDF), semantic (embeddings), hybrid (RRF)"),
+]
 
 
 def _query_error(exc: QueryError) -> HTTPException:
     return HTTPException(status_code=422, detail=f"Invalid query: {exc}")
 
 
+def _api_search(
+    index: Index,
+    semantic: SemanticDeps,
+    q: str,
+    k: int,
+    scorer: ScorerName,
+    page: int,
+    mode: ModeName,
+) -> SearchResponse:
+    try:
+        result = search_page(
+            index,
+            q,
+            scorer=scorer,
+            k=k,
+            page=page,
+            mode=mode,
+            semantic=semantic.index,
+            embedder=semantic.embedder,
+        )
+    except QueryError as exc:
+        raise _query_error(exc) from None
+    except SemanticUnavailable:
+        raise HTTPException(
+            status_code=503,
+            detail="Semantic search is not available on this server",
+        ) from None
+    return to_response(result)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     """Load the index once per process; close it on shutdown (SIGTERM)."""
     settings: Settings = app.state.settings
-    state = IndexState(path=settings.index_path)
+    state = IndexState(path=settings.index_path, semantic_dir=settings.semantic_dir)
     app.state.findex = state
     loader = asyncio.create_task(load_index(state))
     try:
@@ -137,39 +181,40 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     if settings.search_route == "def":
 
-        @app.get("/search", response_model=SearchResponse, tags=["api"])
+        @app.get(
+            "/search",
+            response_model=SearchResponse,
+            responses={503: {"model": ErrorResponse}},
+            tags=["api"],
+        )
         def search(  # pyright: ignore[reportUnusedFunction]
             index: IndexDep,
+            semantic: SemanticDep,
             q: QueryParam,
             k: KParam = 10,
             scorer: ScorerParam = "bm25",
             page: PageParam = 1,
+            mode: ModeParam = "keyword",
         ) -> SearchResponse:
             """Ranked search. A plain ``def``: FastAPI runs it in its thread pool,
             so the CPU-bound scoring never blocks the event loop."""
-            try:
-                result = search_page(index, q, scorer=scorer, k=k, page=page)
-            except QueryError as exc:
-                raise _query_error(exc) from None
-            return to_response(result)
+            return _api_search(index, semantic, q, k, scorer, page, mode)
 
     else:
 
         @app.get("/search", response_model=SearchResponse, tags=["api"])
         async def search_async(  # pyright: ignore[reportUnusedFunction]
             index: IndexDep,
+            semantic: SemanticDep,
             q: QueryParam,
             k: KParam = 10,
             scorer: ScorerParam = "bm25",
             page: PageParam = 1,
+            mode: ModeParam = "keyword",
         ) -> SearchResponse:
             """Experiment only (``SEARCH_ROUTE=async``): CPU work directly inside
             ``async def`` — it runs on the event loop and blocks it."""
-            try:
-                result = search_page(index, q, scorer=scorer, k=k, page=page)
-            except QueryError as exc:
-                raise _query_error(exc) from None
-            return to_response(result)
+            return _api_search(index, semantic, q, k, scorer, page, mode)
 
     @app.get(
         "/docs/{doc_id}",
@@ -203,6 +248,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             index_bytes=state.index_bytes,
             load_seconds=round(state.load_seconds, 3),
             uptime_seconds=round(time.monotonic() - state.started_at, 1),
+            semantic_model=state.semantic.model if state.semantic else None,
+            semantic_chunks=state.semantic.num_chunks if state.semantic else None,
         )
 
     @app.get(
@@ -220,7 +267,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             status_name = "error" if state.status == "error" else "loading"
             body = HealthResponse(status=status_name, detail=state.error)
             return JSONResponse(status_code=503, content=body.model_dump())
-        body = HealthResponse(status="ok", documents=index.num_docs)
+        body = HealthResponse(
+            status="ok",
+            documents=index.num_docs,
+            semantic=state.semantic is not None,
+        )
         return JSONResponse(status_code=200, content=body.model_dump())
 
     # ------------------------------------------------------------------- UI
@@ -228,18 +279,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def _render_search(
         request: Request,
         index: Index,
+        semantic: SemanticDeps,
         q: str,
         k: int,
         scorer: ScorerName,
         page: int,
+        mode: ModeName,
         template: str,
     ) -> HTMLResponse:
         result: ResultPage | None = None
         error: str | None = None
         q = q.strip()
+        if mode != "keyword" and semantic.index is None:
+            mode = "keyword"  # the toggle is hidden then; ignore stale links
         if q:
             try:
-                result = search_page(index, q, scorer=scorer, k=k, page=page)
+                result = search_page(
+                    index,
+                    q,
+                    scorer=scorer,
+                    k=k,
+                    page=page,
+                    mode=mode,
+                    semantic=semantic.index,
+                    embedder=semantic.embedder,
+                )
             except QueryError as exc:
                 error = str(exc)
         return templates.TemplateResponse(
@@ -249,6 +313,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "q": q,
                 "k": k,
                 "scorer": scorer,
+                "mode": mode,
+                "semantic_available": semantic.index is not None,
                 "page": page,
                 "result": result,
                 "error": error,
@@ -261,24 +327,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def home(  # pyright: ignore[reportUnusedFunction]
         request: Request,
         index: IndexDep,
+        semantic: SemanticDep,
         q: Annotated[str, Query(max_length=200)] = "",
         k: KParam = 10,
         scorer: ScorerParam = "bm25",
         page: PageParam = 1,
+        mode: ModeParam = "keyword",
     ) -> HTMLResponse:
-        return _render_search(request, index, q, k, scorer, page, "index.html")
+        return _render_search(
+            request, index, semantic, q, k, scorer, page, mode, "index.html"
+        )
 
     @app.get("/ui/results", response_class=HTMLResponse, include_in_schema=False)
     def results_fragment(  # pyright: ignore[reportUnusedFunction]
         request: Request,
         index: IndexDep,
+        semantic: SemanticDep,
         q: Annotated[str, Query(max_length=200)] = "",
         k: KParam = 10,
         scorer: ScorerParam = "bm25",
         page: PageParam = 1,
+        mode: ModeParam = "keyword",
     ) -> HTMLResponse:
         """htmx target: only the results block, for search-as-you-type."""
-        response = _render_search(request, index, q, k, scorer, page, "_results.html")
+        response = _render_search(
+            request, index, semantic, q, k, scorer, page, mode, "_results.html"
+        )
         # Keep the address bar on the shareable page URL, not the fragment URL.
         query_string = request.url.query
         response.headers["HX-Push-Url"] = f"/?{query_string}" if q else "/"
